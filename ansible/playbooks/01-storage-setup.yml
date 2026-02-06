@@ -1,0 +1,322 @@
+---
+# 01-storage-setup.yml
+# Sets up all storage from scratch (wipe-and-recreate):
+#   - ZFS mirror pool (2x 4TB HDD) with datasets
+#   - Sanoid automated snapshots
+#   - Monthly ZFS scrub
+#   - Samba shares for LAN access
+#   - NFS exports for k8s pods
+#   - Wipes NVMe 1 (prep for k8s PVs)
+#
+# WARNING: This playbook DESTROYS all data on the NAS drives and NVMe 1.
+# Data recovery depends on Backblaze B2 backups (Phase 6).
+
+- name: Storage setup (wipe and recreate)
+  hosts: proxmox
+  gather_facts: true
+
+  vars:
+    zfs_pool: nas
+    zfs_mountpoint: /mnt/nas
+    disk1: /dev/disk/by-id/ata-ST4000VN006-3CW104_WW675XX1
+    disk2: /dev/disk/by-id/ata-ST4000VN006-3CW104_WW675Y4E
+    nvme1: /dev/nvme1n1
+    zfs_datasets:
+      - media
+      - documents
+      - books
+      - photos
+      - backups
+      - share
+    lan_subnet: 192.168.0.0/24
+
+  tasks:
+
+    # --- Decrypt secrets ---
+
+    - name: Load SOPS-encrypted storage secrets
+      community.sops.load_vars:
+        file: ../secrets/storage.sops.yml
+
+    # --- Packages ---
+
+    - name: Install sanoid
+      ansible.builtin.apt:
+        name: sanoid
+        state: present
+
+    # --- ZFS pool: wipe and create ---
+
+    - name: Destroy existing ZFS pool
+      ansible.builtin.command: zpool destroy -f {{ zfs_pool }}
+      ignore_errors: true
+      changed_when: false
+
+    - name: Wipe filesystem signatures from disk 1
+      ansible.builtin.command: wipefs -a {{ disk1 }}
+      changed_when: true
+
+    - name: Wipe filesystem signatures from disk 2
+      ansible.builtin.command: wipefs -a {{ disk2 }}
+      changed_when: true
+
+    - name: Clear ZFS labels from disk 1
+      ansible.builtin.command: zpool labelclear -f {{ disk1 }}
+      ignore_errors: true
+      changed_when: false
+
+    - name: Clear ZFS labels from disk 2
+      ansible.builtin.command: zpool labelclear -f {{ disk2 }}
+      ignore_errors: true
+      changed_when: false
+
+    - name: Create ZFS mirror pool
+      ansible.builtin.command: >
+        zpool create
+        -o ashift=12
+        -O compression=lz4
+        -O atime=off
+        -m {{ zfs_mountpoint }}
+        {{ zfs_pool }}
+        mirror
+        {{ disk1 }}
+        {{ disk2 }}
+
+    # --- ZFS datasets ---
+
+    - name: Create ZFS datasets
+      ansible.builtin.command: zfs create {{ zfs_pool }}/{{ item }}
+      loop: "{{ zfs_datasets }}"
+
+    - name: Set permissions on dataset mountpoints
+      ansible.builtin.file:
+        path: "{{ zfs_mountpoint }}/{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop: "{{ zfs_datasets }}"
+
+    # --- Sanoid (automated snapshots) ---
+
+    - name: Create sanoid config directory
+      ansible.builtin.file:
+        path: /etc/sanoid
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Deploy sanoid configuration
+      ansible.builtin.copy:
+        dest: /etc/sanoid/sanoid.conf
+        content: |
+          [nas/media]
+          use_template = production
+
+          [nas/documents]
+          use_template = production
+
+          [nas/books]
+          use_template = production
+
+          [nas/photos]
+          use_template = production
+
+          [nas/backups]
+          use_template = production
+
+          [nas/share]
+          use_template = production
+
+          [template_production]
+          frequently = 0
+          hourly = 24
+          daily = 30
+          weekly = 8
+          monthly = 0
+          yearly = 0
+          autosnap = yes
+          autoprune = yes
+        owner: root
+        group: root
+        mode: "0644"
+      notify: restart sanoid timer
+
+    - name: Enable sanoid timer
+      ansible.builtin.systemd:
+        name: sanoid.timer
+        enabled: true
+        state: started
+
+    # --- Monthly ZFS scrub ---
+
+    - name: Schedule monthly ZFS scrub
+      ansible.builtin.cron:
+        name: "ZFS scrub nas pool"
+        special_time: monthly
+        job: "/usr/sbin/zpool scrub {{ zfs_pool }}"
+        user: root
+
+    # --- Samba ---
+
+    - name: Deploy Samba configuration
+      ansible.builtin.copy:
+        dest: /etc/samba/smb.conf
+        content: |
+          [global]
+          workgroup = WORKGROUP
+          server string = Proxmox NAS
+          security = user
+          map to guest = Never
+
+          [media]
+          path = {{ zfs_mountpoint }}/media
+          browsable = yes
+          read only = no
+          valid users = nas
+
+          [documents]
+          path = {{ zfs_mountpoint }}/documents
+          browsable = yes
+          read only = no
+          valid users = nas
+
+          [books]
+          path = {{ zfs_mountpoint }}/books
+          browsable = yes
+          read only = no
+          valid users = nas
+
+          [photos]
+          path = {{ zfs_mountpoint }}/photos
+          browsable = yes
+          read only = no
+          valid users = nas
+
+          [share]
+          path = {{ zfs_mountpoint }}/share
+          browsable = yes
+          read only = no
+          valid users = nas
+        owner: root
+        group: root
+        mode: "0644"
+      notify: restart samba
+
+    - name: Create nas system user
+      ansible.builtin.user:
+        name: nas
+        system: true
+        shell: /usr/sbin/nologin
+        create_home: false
+
+    - name: Set Samba password for nas user
+      ansible.builtin.shell: >
+        printf '%s\n%s\n' '{{ samba_password }}' '{{ samba_password }}'
+        | smbpasswd -a -s nas
+      changed_when: true
+      no_log: true
+
+    - name: Enable Samba services
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+      loop:
+        - smbd
+        - nmbd
+
+    # --- NFS exports ---
+
+    - name: Configure NFS exports
+      ansible.builtin.copy:
+        dest: /etc/exports
+        content: |
+          # NFS exports for k8s pods
+          {{ zfs_mountpoint }}/media     {{ lan_subnet }}(rw,sync,no_subtree_check,no_root_squash)
+          {{ zfs_mountpoint }}/documents {{ lan_subnet }}(rw,sync,no_subtree_check,no_root_squash)
+          {{ zfs_mountpoint }}/books     {{ lan_subnet }}(rw,sync,no_subtree_check,no_root_squash)
+          {{ zfs_mountpoint }}/photos    {{ lan_subnet }}(rw,sync,no_subtree_check,no_root_squash)
+          {{ zfs_mountpoint }}/backups   {{ lan_subnet }}(rw,sync,no_subtree_check,no_root_squash)
+          {{ zfs_mountpoint }}/share     {{ lan_subnet }}(rw,sync,no_subtree_check,no_root_squash)
+        owner: root
+        group: root
+        mode: "0644"
+      notify: reload nfs exports
+
+    - name: Enable NFS server
+      ansible.builtin.systemd:
+        name: nfs-kernel-server
+        enabled: true
+        state: started
+
+    # --- NVMe 1: wipe for k8s ---
+
+    - name: Wipe NVMe 1 filesystem signatures
+      ansible.builtin.command: wipefs -a {{ nvme1 }}
+      changed_when: true
+
+    # --- Verification ---
+
+    - name: Verify ZFS pool status
+      ansible.builtin.command: zpool status {{ zfs_pool }}
+      register: pool_status
+      changed_when: false
+
+    - name: Show pool status
+      ansible.builtin.debug:
+        var: pool_status.stdout_lines
+
+    - name: Verify ZFS datasets
+      ansible.builtin.command: zfs list -r {{ zfs_pool }}
+      register: dataset_list
+      changed_when: false
+
+    - name: Show datasets
+      ansible.builtin.debug:
+        var: dataset_list.stdout_lines
+
+    - name: Verify sanoid timer
+      ansible.builtin.command: systemctl is-active sanoid.timer
+      register: sanoid_status
+      changed_when: false
+
+    - name: Show sanoid timer status
+      ansible.builtin.debug:
+        var: sanoid_status.stdout
+
+    - name: Verify Samba config
+      ansible.builtin.command: testparm -s
+      register: samba_config
+      changed_when: false
+
+    - name: Show Samba config
+      ansible.builtin.debug:
+        var: samba_config.stdout_lines
+
+    - name: Verify NFS exports
+      ansible.builtin.command: exportfs -v
+      register: nfs_exports
+      changed_when: false
+
+    - name: Show NFS exports
+      ansible.builtin.debug:
+        var: nfs_exports.stdout_lines
+
+  handlers:
+    - name: restart sanoid timer
+      ansible.builtin.systemd:
+        name: sanoid.timer
+        state: restarted
+
+    - name: restart samba
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: restarted
+      loop:
+        - smbd
+        - nmbd
+
+    - name: reload nfs exports
+      ansible.builtin.command: exportfs -ra

@@ -1,0 +1,17 @@
+creation_rules:
+  # Kubernetes secrets
+  - path_regex: kubernetes/.*secret.*\.yaml$
+    encrypted_regex: "^(data|stringData)$"
+    age: "age1hxq9k30age89dnn9z8e5pmsd28936gxvv5tmqur87l2wmeg2qg5qr5x3ws"
+
+  # Talos secrets
+  - path_regex: talos/secrets\.yaml$
+    age: "age1hxq9k30age89dnn9z8e5pmsd28936gxvv5tmqur87l2wmeg2qg5qr5x3ws"
+
+  # Ansible secrets
+  - path_regex: ansible/secrets/.*\.ya?ml$
+    age: "age1hxq9k30age89dnn9z8e5pmsd28936gxvv5tmqur87l2wmeg2qg5qr5x3ws"
+
+  # Install secrets (Proxmox answer file)
+  - path_regex: install/.*\.ya?ml$
+    age: "age1hxq9k30age89dnn9z8e5pmsd28936gxvv5tmqur87l2wmeg2qg5qr5x3ws"
