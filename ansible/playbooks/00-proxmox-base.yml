@@ -1,0 +1,111 @@
+---
+# 00-proxmox-base.yml
+# Configures a fresh Proxmox VE install:
+#   - Switches from enterprise to no-subscription repos
+#   - Removes the subscription nag popup
+#   - Installs useful base packages
+
+- name: Proxmox base configuration
+  hosts: proxmox
+  gather_facts: true
+
+  tasks:
+    # --- APT Repositories ---
+
+    - name: Disable PVE enterprise repo
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/pve-enterprise.sources
+        content: |
+          # Disabled by Ansible - no subscription
+          # Types: deb
+          # URIs: https://enterprise.proxmox.com/debian/pve
+          # Suites: {{ ansible_facts['distribution_release'] }}
+          # Components: pve-enterprise
+          # Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Disable Ceph enterprise repo
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/ceph.sources
+        content: |
+          # Disabled by Ansible - no subscription
+          # Types: deb
+          # URIs: https://enterprise.proxmox.com/debian/ceph-squid
+          # Suites: {{ ansible_facts['distribution_release'] }}
+          # Components: enterprise
+          # Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Add PVE no-subscription repo
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/pve-no-subscription.sources
+        content: |
+          Types: deb
+          URIs: http://download.proxmox.com/debian/pve
+          Suites: {{ ansible_facts['distribution_release'] }}
+          Components: pve-no-subscription
+          Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Add Ceph no-subscription repo
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/ceph-no-subscription.sources
+        content: |
+          Types: deb
+          URIs: http://download.proxmox.com/debian/ceph-squid
+          Suites: {{ ansible_facts['distribution_release'] }}
+          Components: no-subscription
+          Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 0
+
+    # --- Subscription Nag ---
+
+    - name: Remove subscription nag from web UI
+      ansible.builtin.replace:
+        path: /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js
+        regexp: '(\s+)(Ext\.Msg\.show\(\{[^}]*title:\s*gettext\(.No valid sub)'
+        replace: '\1void({ // subscription nag removed by Ansible\n\1'
+      notify: restart pveproxy
+
+    # --- Base Packages ---
+
+    - name: Install base packages
+      ansible.builtin.apt:
+        name:
+          - vim
+          - htop
+          - iotop
+          - curl
+          - wget
+          - tmux
+          - lm-sensors
+          - ethtool
+          - net-tools
+          - dnsutils
+          - tree
+          - jq
+          - unzip
+          - python3
+          - python3-apt
+          - nfs-kernel-server
+          - samba
+        state: present
+
+  handlers:
+    - name: restart pveproxy
+      ansible.builtin.systemd:
+        name: pveproxy
+        state: restarted
