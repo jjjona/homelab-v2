@@ -1,0 +1,52 @@
+# ============================================
+# READ ../SECURITY.md BEFORE COMMITTING ANYTHING
+# ============================================
+
+# Private keys
+*.key
+*.pem
+id_*
+!*.pub
+
+# Cluster credentials (unencrypted)
+talosconfig
+kubeconfig
+*.kubeconfig
+
+# Cloudflare credentials
+cloudflare-tunnel-backup.json
+
+# Environment files
+.env
+.env.*
+.env.local
+
+# Age private key (master decryption key)
+age.agekey
+*.agekey
+
+# Ansible vault password files
+.vault_pass
+.vault_password
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Terraform state (if ever used)
+*.tfstate
+*.tfstate.backup
+
+# Proxmox answer file unencrypted
+WARNING_CLEARPASS_answer.toml
