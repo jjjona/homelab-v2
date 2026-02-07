@@ -8,10 +8,8 @@
 id_*
 !*.pub
 
-# Cluster credentials (unencrypted)
-talosconfig
-kubeconfig
-*.kubeconfig
+# Docker override files (local dev only)
+docker-compose.override.yml
 
 # Cloudflare credentials
 cloudflare-tunnel-backup.json

@@ -1,30 +1,27 @@
 # homelab-v2
 
-Infrastructure-as-code for my homelab. Proxmox host, Talos Kubernetes cluster, GitOps with ArgoCD.
+Infrastructure-as-code for my homelab. Proxmox host, Docker Compose on LXC, Ansible-managed.
 
 All secrets are SOPS-encrypted with age. See the repo for details.
 
 ## Stack
 
 - **Host:** Proxmox VE on AMD Ryzen 7 7700X / 32GB DDR5 / RTX 4070 Ti
-- **Kubernetes:** Talos Linux
-- **GitOps:** ArgoCD
-- **Networking:** Cilium CNI, MetalLB, Nginx Ingress, Cloudflare Tunnel
-- **Storage:** ZFS (NAS), Longhorn (k8s PVs)
-- **Auth:** Keycloak SSO
-- **Monitoring:** Prometheus + Grafana
+- **Containers:** Docker Compose on unprivileged LXC
+- **Reverse proxy:** Caddy (automatic HTTPS)
+- **Remote access:** Cloudflare Tunnel
+- **Storage:** ZFS mirror (NAS), NVMe (Docker volumes)
+- **Sharing:** Samba + NFS on Proxmox host
 - **Backups:** restic to Backblaze B2
+- **Secrets:** SOPS + age
 
 ## Structure
 
 ```
 install/          # Proxmox automated installer config
-ansible/          # Host configuration playbooks
-talos/            # Talos machine configs
-kubernetes/       # k8s manifests (ArgoCD apps)
-  bootstrap/      # ArgoCD itself
-  infrastructure/ # Ingress, cert-manager, storage, etc.
-  apps/           # Jellyfin, arr suite, Linkwarden, etc.
-backups/          # Backup configuration
-scripts/          # Utility scripts
+ansible/          # Host + LXC configuration playbooks
+docker/           # Docker Compose stack, Caddyfile, app configs
+backups/          # Backup scripts
+scripts/          # Utility scripts (GPU switch, rebuild)
+docs/             # Documentation
 ```
