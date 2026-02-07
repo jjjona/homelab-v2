@@ -73,12 +73,57 @@
 
     # --- Subscription Nag ---
 
+    - name: Check if subscription nag is already removed
+      ansible.builtin.command:
+        cmd: grep -c 'nag removed' /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js
+      register: nag_check
+      changed_when: false
+      failed_when: false
+
     - name: Remove subscription nag from web UI
-      ansible.builtin.replace:
-        path: /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js
-        regexp: '(\s+)(Ext\.Msg\.show\(\{[^}]*title:\s*gettext\(.No valid sub)'
-        replace: '\1void({ // subscription nag removed by Ansible\n\1'
+      ansible.builtin.shell:
+        cmd: |
+          LINE=$(grep -n "gettext('No valid subscription')" /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js | head -1 | cut -d: -f1)
+          if [ -n "$LINE" ]; then
+            PREV=$((LINE - 1))
+            sed -i "${PREV}s/Ext\.Msg\.show({/void({ \/\/ nag removed/" /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js
+          fi
+      when: nag_check.stdout | int == 0
       notify: restart pveproxy
+
+    # --- Admin User ---
+
+    - name: Load user secrets
+      ansible.builtin.set_fact:
+        user_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/users.sops.yml') | from_yaml }}"
+
+    - name: Create admin Linux user
+      ansible.builtin.user:
+        name: "{{ user_secrets.proxmox_admin_user }}"
+        groups: sudo
+        append: true
+        shell: /bin/bash
+        create_home: true
+
+    - name: Set admin user password
+      ansible.builtin.shell:
+        cmd: "echo '{{ user_secrets.proxmox_admin_user }}:{{ user_secrets.proxmox_admin_password }}' | chpasswd"
+      changed_when: true
+      no_log: true
+
+    - name: Create Proxmox PVE user
+      ansible.builtin.command:
+        cmd: "pveum user add {{ user_secrets.proxmox_admin_user }}@pam"
+      register: pveum_add
+      changed_when: pveum_add.rc == 0
+      failed_when:
+        - pveum_add.rc != 0
+        - "'already exists' not in pveum_add.stderr"
+
+    - name: Grant Administrator role
+      ansible.builtin.command:
+        cmd: "pveum acl modify / -user {{ user_secrets.proxmox_admin_user }}@pam -role Administrator"
+      changed_when: true
 
     # --- Base Packages ---
 
