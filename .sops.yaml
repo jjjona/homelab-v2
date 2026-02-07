@@ -7,6 +7,10 @@ creation_rules:
   - path_regex: ansible/secrets/.*\.ya?ml$
     age: "age1hxq9k30age89dnn9z8e5pmsd28936gxvv5tmqur87l2wmeg2qg5qr5x3ws"
 
+  # Ansible inventory host_vars (encrypted connection details)
+  - path_regex: ansible/inventory/.*\.sops\.ya?ml$
+    age: "age1hxq9k30age89dnn9z8e5pmsd28936gxvv5tmqur87l2wmeg2qg5qr5x3ws"
+
   # Install secrets (Proxmox answer file)
   - path_regex: install/.*\.ya?ml$
     age: "age1hxq9k30age89dnn9z8e5pmsd28936gxvv5tmqur87l2wmeg2qg5qr5x3ws"
