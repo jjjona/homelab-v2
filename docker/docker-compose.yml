@@ -1,0 +1,48 @@
+services:
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: caddy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - /mnt/data/docker/caddy/data:/data
+      - /mnt/data/docker/caddy/config:/config
+    env_file: .env
+    restart: unless-stopped
+    networks:
+      - web
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflared
+    command: tunnel run
+    volumes:
+      - ./cloudflared/config.yml:/etc/cloudflared/config.yml:ro
+      - ./cloudflared/credentials.json:/etc/cloudflared/credentials.json:ro
+    restart: unless-stopped
+    networks:
+      - web
+    depends_on:
+      - caddy
+
+  arcane:
+    image: ghcr.io/getarcaneapp/arcane:latest
+    container_name: arcane
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /mnt/data/docker/arcane/data:/app/data
+    env_file: .env
+    environment:
+      - APP_URL=https://arcane.${DOMAIN}
+      - ENCRYPTION_KEY=${ARCANE_ENCRYPTION_KEY}
+      - JWT_SECRET=${ARCANE_JWT_SECRET}
+    restart: unless-stopped
+    networks:
+      - web
+
+networks:
+  web:
+    driver: bridge

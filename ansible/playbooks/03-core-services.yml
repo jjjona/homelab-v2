@@ -1,0 +1,206 @@
+---
+# 03-core-services.yml
+# Deploys the core Docker Compose stack to the Docker host LXC:
+#   - Caddy (reverse proxy)
+#   - cloudflared (Cloudflare Tunnel)
+#   - Arcane (Docker management UI)
+#
+# Decrypts SOPS secrets, copies files, templates config, runs compose up.
+# Re-runnable: each run copies latest files and recreates containers.
+
+- name: Deploy core services
+  hosts: docker_host
+  gather_facts: false
+
+  vars:
+    project_dir: /mnt/data/docker/core
+    secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../../docker/secrets.sops.yml') | from_yaml }}"
+    tunnel_creds: "{{ lookup('community.sops.sops', playbook_dir + '/../../docker/cloudflared/credentials.sops.json') }}"
+    tunnel_id: "{{ (tunnel_creds | from_json).TunnelID }}"
+
+  pre_tasks:
+    - name: Wait for SSH connection
+      ansible.builtin.wait_for_connection:
+        timeout: 60
+
+  tasks:
+
+    # --- Directory structure ---
+
+    - name: Create project directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - "{{ project_dir }}"
+        - "{{ project_dir }}/caddy"
+        - "{{ project_dir }}/cloudflared"
+        - /mnt/data/docker/caddy/data
+        - /mnt/data/docker/caddy/config
+        - /mnt/data/docker/arcane/data
+
+    # --- Copy compose files ---
+
+    - name: Copy docker-compose.yml
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../docker/docker-compose.yml"
+        dest: "{{ project_dir }}/docker-compose.yml"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Copy Caddyfile
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../docker/caddy/Caddyfile"
+        dest: "{{ project_dir }}/caddy/Caddyfile"
+        owner: root
+        group: root
+        mode: "0644"
+
+    # --- Write secrets (decrypted) ---
+
+    - name: Write .env file
+      ansible.builtin.copy:
+        dest: "{{ project_dir }}/.env"
+        content: |
+          DOMAIN={{ secrets.domain }}
+          ARCANE_ENCRYPTION_KEY={{ secrets.arcane_encryption_key }}
+          ARCANE_JWT_SECRET={{ secrets.arcane_jwt_secret }}
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Write tunnel credentials
+      ansible.builtin.copy:
+        dest: "{{ project_dir }}/cloudflared/credentials.json"
+        content: "{{ tunnel_creds }}"
+        owner: "65532"
+        group: "65532"
+        mode: "0600"
+
+    - name: Write cloudflared config
+      ansible.builtin.copy:
+        dest: "{{ project_dir }}/cloudflared/config.yml"
+        content: |
+          tunnel: {{ tunnel_id }}
+          credentials-file: /etc/cloudflared/credentials.json
+
+          ingress:
+            - service: http://caddy:80
+        owner: "65532"
+        group: "65532"
+        mode: "0644"
+
+    # --- Deploy ---
+
+    - name: Pull latest images
+      ansible.builtin.command:
+        cmd: docker compose pull
+        chdir: "{{ project_dir }}"
+      changed_when: true
+
+    - name: Start compose stack
+      ansible.builtin.command:
+        cmd: docker compose up -d --remove-orphans
+        chdir: "{{ project_dir }}"
+      changed_when: true
+
+    # --- Verify ---
+
+    - name: Wait for containers to start
+      ansible.builtin.pause:
+        seconds: 10
+
+    - name: Check compose status
+      ansible.builtin.command:
+        cmd: docker compose ps
+        chdir: "{{ project_dir }}"
+      register: compose_status
+      changed_when: false
+
+    - name: Show compose status
+      ansible.builtin.debug:
+        var: compose_status.stdout_lines
+
+    - name: Check container health
+      ansible.builtin.command:
+        cmd: docker ps --format "table {% raw %}{{.Names}}\t{{.Status}}\t{{.Ports}}{% endraw %}"
+      register: docker_status
+      changed_when: false
+
+    - name: Show container status
+      ansible.builtin.debug:
+        var: docker_status.stdout_lines
+
+    # --- Arcane user setup ---
+    # Arcane port is only exposed within Docker network, so we go through Caddy on port 80
+
+    - name: Login to Arcane with default credentials
+      ansible.builtin.uri:
+        url: "http://localhost:80/api/auth/login"
+        method: POST
+        headers:
+          Host: "arcane.{{ secrets.domain }}"
+        body_format: json
+        body:
+          username: arcane
+          password: arcane-admin
+        status_code: [200, 401]
+      register: arcane_default_login
+
+    - name: Configure Arcane admin user
+      when: arcane_default_login.status == 200
+      block:
+        - name: Create Arcane admin user
+          ansible.builtin.uri:
+            url: "http://localhost:80/api/users"
+            method: POST
+            headers:
+              Host: "arcane.{{ secrets.domain }}"
+              Authorization: "Bearer {{ arcane_default_login.json.data.token }}"
+            body_format: json
+            body:
+              username: "{{ secrets.arcane_admin_user }}"
+              password: "{{ secrets.arcane_admin_password }}"
+              displayName: "{{ secrets.arcane_admin_user }}"
+              email: "admin@{{ secrets.domain }}"
+              roles: ["admin"]
+            status_code: [200, 201]
+          no_log: true
+
+        - name: Login as new Arcane admin
+          ansible.builtin.uri:
+            url: "http://localhost:80/api/auth/login"
+            method: POST
+            headers:
+              Host: "arcane.{{ secrets.domain }}"
+            body_format: json
+            body:
+              username: "{{ secrets.arcane_admin_user }}"
+              password: "{{ secrets.arcane_admin_password }}"
+            status_code: 200
+          register: arcane_new_login
+          no_log: true
+
+        - name: Get default Arcane user ID
+          ansible.builtin.uri:
+            url: "http://localhost:80/api/users"
+            headers:
+              Host: "arcane.{{ secrets.domain }}"
+              Authorization: "Bearer {{ arcane_new_login.json.data.token }}"
+          register: arcane_users
+
+        - name: Delete default Arcane user
+          ansible.builtin.uri:
+            url: "http://localhost:80/api/users/{{ item.id }}"
+            method: DELETE
+            headers:
+              Host: "arcane.{{ secrets.domain }}"
+              Authorization: "Bearer {{ arcane_new_login.json.data.token }}"
+            status_code: [200, 204]
+          loop: "{{ arcane_users.json.data | selectattr('username', 'equalto', 'arcane') | list }}"
+          loop_control:
+            label: "{{ item.username }}"

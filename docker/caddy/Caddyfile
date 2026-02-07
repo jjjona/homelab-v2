@@ -1,0 +1,12 @@
+http://arcane.{$DOMAIN} {
+	reverse_proxy arcane:3552
+}
+
+http://bog.{$DOMAIN} {
+	reverse_proxy https://192.168.0.158:8006 {
+		transport http {
+			tls_insecure_skip_verify
+		}
+		flush_interval -1
+	}
+}
