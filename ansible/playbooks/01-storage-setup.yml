@@ -5,8 +5,8 @@
 #   - Sanoid automated snapshots
 #   - Monthly ZFS scrub
 #   - Samba shares for LAN access
-#   - NFS exports for k8s pods
-#   - Wipes NVMe 1 (prep for k8s PVs)
+#   - NFS exports for Docker containers
+#   - Wipes NVMe 1 (prep for Docker volumes)
 #
 # WARNING: This playbook DESTROYS all data on the NAS drives and NVMe 1.
 # Data recovery depends on Backblaze B2 backups (Phase 6).
@@ -233,7 +233,7 @@
       ansible.builtin.copy:
         dest: /etc/exports
         content: |
-          # NFS exports for k8s pods
+          # NFS exports for Docker containers
           {{ zfs_mountpoint }}/media     {{ lan_subnet }}(rw,sync,no_subtree_check,no_root_squash)
           {{ zfs_mountpoint }}/documents {{ lan_subnet }}(rw,sync,no_subtree_check,no_root_squash)
           {{ zfs_mountpoint }}/books     {{ lan_subnet }}(rw,sync,no_subtree_check,no_root_squash)
@@ -251,7 +251,7 @@
         enabled: true
         state: started
 
-    # --- NVMe 1: wipe for k8s ---
+    # --- NVMe 1: wipe for Docker volumes ---
 
     - name: Wipe NVMe 1 filesystem signatures
       ansible.builtin.command: wipefs -a {{ nvme1 }}
