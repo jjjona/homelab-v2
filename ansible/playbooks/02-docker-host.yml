@@ -101,6 +101,10 @@
 
     # --- Download CT template ---
 
+    - name: Update container template index
+      ansible.builtin.command: pveam update
+      changed_when: false
+
     - name: Download Debian CT template
       ansible.builtin.command: >
         pveam download {{ ct_template_storage }} {{ ct_template }}
