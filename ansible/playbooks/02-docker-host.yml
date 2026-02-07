@@ -1,0 +1,369 @@
+---
+# 02-docker-host.yml
+# Creates an unprivileged LXC container running Docker Engine:
+#   - Destroys and recreates LXC 200 (docker-host)
+#   - Formats NVMe 1 as ext4 for app data volumes
+#   - Bind-mounts NVMe 1 + all NAS datasets into LXC
+#   - Installs Docker Engine + Compose from official repo
+#
+# WARNING: This playbook DESTROYS LXC 200 and reformats NVMe 1.
+
+# =============================================================
+# Play 1: Proxmox host — create LXC
+# =============================================================
+- name: Create Docker host LXC (wipe and recreate)
+  hosts: proxmox
+  gather_facts: false
+
+  vars:
+    ct_id: 200
+    ct_hostname: docker-host
+    ct_ip: 192.168.0.159
+    ct_gw: 192.168.0.1
+    ct_memory: 8192
+    ct_swap: 2048
+    ct_cores: 4
+    ct_rootfs_size: 50
+    ct_template: debian-12-standard_12.12-1_amd64.tar.zst
+    ct_template_storage: local
+    nvme1: /dev/nvme1n1
+    nvme1_mount: /mnt/docker-data
+    nvme1_label: docker-data
+    nas_mount: /mnt/nas
+    nas_datasets:
+      - media
+      - documents
+      - books
+      - photos
+      - backups
+      - share
+    ssh_pubkey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFG9NoQSuVYiBD5fib0bN43e2UWwH5iEeDy99cCsHrHC"
+
+  tasks:
+
+    # --- Destroy existing LXC ---
+
+    - name: Stop LXC {{ ct_id }}
+      ansible.builtin.command: pct stop {{ ct_id }}
+      ignore_errors: true
+      changed_when: false
+
+    - name: Destroy LXC {{ ct_id }}
+      ansible.builtin.command: pct destroy {{ ct_id }} --purge
+      ignore_errors: true
+      changed_when: false
+
+    # --- Format NVMe 1 ---
+
+    - name: Unmount NVMe 1 if mounted
+      ansible.builtin.command: umount {{ nvme1_mount }}
+      ignore_errors: true
+      changed_when: false
+
+    - name: Wipe NVMe 1 filesystem signatures
+      ansible.builtin.command: wipefs -a {{ nvme1 }}
+      changed_when: true
+
+    - name: Format NVMe 1 as ext4
+      ansible.builtin.command: mkfs.ext4 -L {{ nvme1_label }} {{ nvme1 }}
+      changed_when: true
+
+    - name: Create NVMe 1 mount point
+      ansible.builtin.file:
+        path: "{{ nvme1_mount }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Remove old NVMe 1 fstab entry
+      ansible.builtin.lineinfile:
+        path: /etc/fstab
+        regexp: "{{ nvme1_mount }}"
+        state: absent
+
+    - name: Add NVMe 1 to fstab
+      ansible.builtin.lineinfile:
+        path: /etc/fstab
+        line: "LABEL={{ nvme1_label }}  {{ nvme1_mount }}  ext4  defaults,noatime  0  2"
+        state: present
+
+    - name: Mount NVMe 1
+      ansible.builtin.command: mount {{ nvme1_mount }}
+      changed_when: true
+
+    - name: Set NVMe 1 ownership for unprivileged LXC
+      ansible.builtin.file:
+        path: "{{ nvme1_mount }}"
+        owner: "100000"
+        group: "100000"
+        mode: "0755"
+
+    # --- Download CT template ---
+
+    - name: Download Debian CT template
+      ansible.builtin.command: >
+        pveam download {{ ct_template_storage }} {{ ct_template }}
+      register: template_download
+      changed_when: "'already exists' not in template_download.stdout"
+      failed_when:
+        - template_download.rc != 0
+        - "'already exists' not in template_download.stderr"
+
+    # --- Write SSH pubkey to temp file ---
+
+    - name: Write SSH public key to temp file
+      ansible.builtin.copy:
+        dest: /tmp/ct-ssh-pubkey.pub
+        content: "{{ ssh_pubkey }}\n"
+        mode: "0600"
+
+    # --- Create LXC ---
+
+    - name: Create LXC {{ ct_id }}
+      ansible.builtin.command: >
+        pct create {{ ct_id }}
+        {{ ct_template_storage }}:vztmpl/{{ ct_template }}
+        --hostname {{ ct_hostname }}
+        --unprivileged 1
+        --features nesting=1,keyctl=1
+        --rootfs local-lvm:{{ ct_rootfs_size }}
+        --memory {{ ct_memory }}
+        --swap {{ ct_swap }}
+        --cores {{ ct_cores }}
+        --net0 name=eth0,bridge=vmbr0,ip={{ ct_ip }}/24,gw={{ ct_gw }},firewall=0
+        --nameserver 1.1.1.1
+        --onboot 1
+        --start 0
+        --ssh-public-keys /tmp/ct-ssh-pubkey.pub
+
+    # --- Add bind mounts ---
+
+    - name: Bind-mount NVMe 1 into LXC
+      ansible.builtin.command: >
+        pct set {{ ct_id }}
+        --mp0 {{ nvme1_mount }},mp=/mnt/data
+
+    - name: Bind-mount NAS datasets into LXC
+      ansible.builtin.command: >
+        pct set {{ ct_id }}
+        --mp{{ idx + 1 }} {{ nas_mount }}/{{ item }},mp=/mnt/nas/{{ item }}
+      loop: "{{ nas_datasets }}"
+      loop_control:
+        index_var: idx
+
+    # --- Start LXC ---
+
+    - name: Start LXC {{ ct_id }}
+      ansible.builtin.command: pct start {{ ct_id }}
+
+    - name: Wait for LXC systemd to be ready
+      ansible.builtin.command: pct exec {{ ct_id }} -- systemctl is-system-running --wait
+      register: systemd_ready
+      retries: 12
+      delay: 5
+      until: systemd_ready.rc == 0 or (systemd_ready.stdout is defined and 'running' in systemd_ready.stdout)
+      changed_when: false
+
+    # --- Cleanup ---
+
+    - name: Remove temp SSH key file
+      ansible.builtin.file:
+        path: /tmp/ct-ssh-pubkey.pub
+        state: absent
+
+    # --- Verify ---
+
+    - name: Check LXC status
+      ansible.builtin.command: pct status {{ ct_id }}
+      register: ct_status
+      changed_when: false
+
+    - name: Show LXC status
+      ansible.builtin.debug:
+        var: ct_status.stdout
+
+    - name: Check LXC config
+      ansible.builtin.command: pct config {{ ct_id }}
+      register: ct_config
+      changed_when: false
+
+    - name: Show LXC config
+      ansible.builtin.debug:
+        var: ct_config.stdout_lines
+
+    - name: Check NVMe 1 mount inside LXC
+      ansible.builtin.command: pct exec {{ ct_id }} -- findmnt /mnt/data
+      register: ct_mount
+      changed_when: false
+
+    - name: Show NVMe 1 mount
+      ansible.builtin.debug:
+        var: ct_mount.stdout_lines
+
+# =============================================================
+# Play 2: Docker host LXC — install Docker
+# =============================================================
+- name: Install Docker on LXC
+  hosts: docker_host
+  gather_facts: false
+
+  pre_tasks:
+    - name: Wait for SSH connection
+      ansible.builtin.wait_for_connection:
+        timeout: 60
+
+    - name: Gather facts
+      ansible.builtin.setup:
+
+  tasks:
+
+    # --- Prerequisites ---
+
+    - name: Install Docker prerequisites
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+          - python3
+        state: present
+        update_cache: true
+
+    # --- Docker official repo ---
+
+    - name: Create keyrings directory
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Download Docker GPG key
+      ansible.builtin.get_url:
+        url: https://download.docker.com/linux/debian/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        mode: "0644"
+
+    - name: Add Docker apt repository
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/docker.list
+        content: >
+          deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc]
+          https://download.docker.com/linux/debian
+          {{ ansible_facts['distribution_release'] }} stable
+        mode: "0644"
+
+    # --- Install Docker ---
+
+    - name: Install Docker Engine
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: true
+
+    # --- Configure Docker daemon ---
+
+    - name: Configure Docker daemon
+      ansible.builtin.copy:
+        dest: /etc/docker/daemon.json
+        content: |
+          {
+            "storage-driver": "overlay2",
+            "log-driver": "json-file",
+            "log-opts": {
+              "max-size": "10m",
+              "max-file": "3"
+            }
+          }
+        owner: root
+        group: root
+        mode: "0644"
+      notify: restart docker
+
+    # --- Enable services ---
+
+    - name: Enable Docker and containerd
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+      loop:
+        - docker
+        - containerd
+
+    # --- App data directory ---
+
+    - name: Create app data base directory
+      ansible.builtin.file:
+        path: /mnt/data/docker
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    # --- Verify ---
+
+    - name: Check Docker version
+      ansible.builtin.command: docker version
+      register: docker_version
+      changed_when: false
+
+    - name: Show Docker version
+      ansible.builtin.debug:
+        var: docker_version.stdout_lines
+
+    - name: Check Compose version
+      ansible.builtin.command: docker compose version
+      register: compose_version
+      changed_when: false
+
+    - name: Show Compose version
+      ansible.builtin.debug:
+        var: compose_version.stdout
+
+    - name: Check Docker info
+      ansible.builtin.command: docker info
+      register: docker_info
+      changed_when: false
+
+    - name: Show Docker info (storage driver)
+      ansible.builtin.debug:
+        msg: "{{ docker_info.stdout_lines | select('search', 'Storage Driver|Docker Root Dir') | list }}"
+
+    - name: Run hello-world test
+      ansible.builtin.command: docker run --rm hello-world
+      register: hello_world
+      changed_when: false
+
+    - name: Show hello-world output
+      ansible.builtin.debug:
+        var: hello_world.stdout_lines
+
+    - name: Check NVMe 1 mount
+      ansible.builtin.command: df -h /mnt/data
+      register: nvme_mount
+      changed_when: false
+
+    - name: Show NVMe 1 disk usage
+      ansible.builtin.debug:
+        var: nvme_mount.stdout_lines
+
+    - name: List NAS mounts
+      ansible.builtin.command: ls -la /mnt/nas/
+      register: nas_mounts
+      changed_when: false
+
+    - name: Show NAS mounts
+      ansible.builtin.debug:
+        var: nas_mounts.stdout_lines
+
+  handlers:
+    - name: restart docker
+      ansible.builtin.systemd:
+        name: docker
+        state: restarted
