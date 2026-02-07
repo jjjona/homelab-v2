@@ -1,0 +1,126 @@
+---
+# 04-seedbox-sync.yml
+# Sets up seedbox download sync on the Proxmox host:
+#   - Deploys SSH key for seedbox authentication
+#   - Installs rsync sync script + cron job (every 5 min)
+#   - Log rotation for sync log
+#
+# Prerequisites:
+#   - SSH keypair generated on Proxmox host
+#   - Public key added to seedbox authorized_keys
+#   - Seedbox secrets SOPS-encrypted in ansible/secrets/seedbox.sops.yml
+
+- name: Configure seedbox sync
+  hosts: proxmox
+  gather_facts: false
+
+  vars:
+    seedbox: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/seedbox.sops.yml') | from_yaml }}"
+    sync_script: /usr/local/bin/seedbox-sync.sh
+    sync_log: /var/log/seedbox-sync.log
+
+  pre_tasks:
+    - name: Wait for SSH connection
+      ansible.builtin.wait_for_connection:
+        timeout: 60
+
+  tasks:
+
+    # --- SSH key ---
+
+    - name: Deploy seedbox SSH private key
+      ansible.builtin.copy:
+        dest: /root/.ssh/seedbox_ed25519
+        content: "{{ seedbox.seedbox_ssh_private_key }}"
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Add seedbox to known_hosts
+      ansible.builtin.known_hosts:
+        name: "{{ seedbox.seedbox_host }}"
+        key: "{{ seedbox.seedbox_host_key }}"
+        path: /root/.ssh/known_hosts
+        state: present
+
+    # --- Sync script ---
+
+    - name: Deploy seedbox sync script
+      ansible.builtin.copy:
+        dest: "{{ sync_script }}"
+        content: |
+          #!/bin/bash
+          # Sync completed downloads from seedbox to NAS
+          # Runs via cron every 5 minutes
+
+          LOCKFILE=/tmp/seedbox-sync.lock
+          LOGFILE={{ sync_log }}
+          SSH_KEY=/root/.ssh/seedbox_ed25519
+
+          # Prevent overlapping runs
+          exec 200>"$LOCKFILE"
+          flock -n 200 || { echo "$(date): Already running, skipping" >> "$LOGFILE"; exit 0; }
+
+          echo "$(date): Starting sync" >> "$LOGFILE"
+
+          rsync -avz --ignore-existing \
+            -e "ssh -i $SSH_KEY -p {{ seedbox.seedbox_port }}" \
+            {{ seedbox.seedbox_user }}@{{ seedbox.seedbox_host }}:{{ seedbox.seedbox_remote_path }}/ \
+            /mnt/nas/media/downloads/complete/ \
+            >> "$LOGFILE" 2>&1
+
+          echo "$(date): Sync complete" >> "$LOGFILE"
+        owner: root
+        group: root
+        mode: "0755"
+
+    # --- Cron ---
+
+    - name: Install seedbox sync cron job
+      ansible.builtin.cron:
+        name: "Seedbox download sync"
+        minute: "*/5"
+        job: "{{ sync_script }}"
+        user: root
+
+    # --- Log rotation ---
+
+    - name: Set up log rotation for sync log
+      ansible.builtin.copy:
+        dest: /etc/logrotate.d/seedbox-sync
+        content: |
+          {{ sync_log }} {
+            weekly
+            rotate 4
+            compress
+            missingok
+            notifempty
+          }
+        owner: root
+        group: root
+        mode: "0644"
+
+    # --- Verify ---
+
+    - name: Test seedbox SSH connection
+      ansible.builtin.command: >
+        ssh -i /root/.ssh/seedbox_ed25519
+        -p {{ seedbox.seedbox_port }}
+        -o BatchMode=yes
+        {{ seedbox.seedbox_user }}@{{ seedbox.seedbox_host }}
+        echo "SSH connection OK"
+      register: ssh_test
+      changed_when: false
+
+    - name: Show SSH test result
+      ansible.builtin.debug:
+        var: ssh_test.stdout
+
+    - name: Show cron job
+      ansible.builtin.command: crontab -l
+      register: cron_list
+      changed_when: false
+
+    - name: Show crontab
+      ansible.builtin.debug:
+        var: cron_list.stdout_lines

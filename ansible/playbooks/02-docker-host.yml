@@ -156,6 +156,16 @@
       loop_control:
         index_var: idx
 
+    # --- GPU passthrough (AMD iGPU for Jellyfin VAAPI) ---
+
+    - name: Add GPU passthrough to LXC config
+      ansible.builtin.blockinfile:
+        path: /etc/pve/lxc/{{ ct_id }}.conf
+        marker: "# {mark} GPU PASSTHROUGH"
+        block: |
+          lxc.cgroup2.devices.allow: c 226:* rwm
+          lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir
+
     # --- Start LXC ---
 
     - name: Start LXC {{ ct_id }}

@@ -10,3 +10,23 @@ http://bog.{$DOMAIN} {
 		flush_interval -1
 	}
 }
+
+http://jellyfin.{$DOMAIN} {
+	reverse_proxy jellyfin:8096
+}
+
+http://sonarr.{$DOMAIN} {
+	reverse_proxy sonarr:8989
+}
+
+http://radarr.{$DOMAIN} {
+	reverse_proxy radarr:7878
+}
+
+http://prowlarr.{$DOMAIN} {
+	reverse_proxy prowlarr:9696
+}
+
+http://links.{$DOMAIN} {
+	reverse_proxy linkding:9090
+}

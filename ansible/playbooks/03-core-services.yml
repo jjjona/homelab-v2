@@ -1,13 +1,48 @@
 ---
 # 03-core-services.yml
-# Deploys the core Docker Compose stack to the Docker host LXC:
+# Deploys the full Docker Compose stack to the Docker host LXC:
 #   - Caddy (reverse proxy)
 #   - cloudflared (Cloudflare Tunnel)
 #   - Arcane (Docker management UI)
+#   - Jellyfin (media streaming, VAAPI transcoding)
+#   - Sonarr, Radarr, Prowlarr (arr suite)
+#   - Linkding (bookmark manager)
 #
 # Decrypts SOPS secrets, copies files, templates config, runs compose up.
 # Re-runnable: each run copies latest files and recreates containers.
 
+# =============================================================
+# Play 1: Proxmox host — create media directory structure on ZFS
+# =============================================================
+- name: Create media directories on NAS
+  hosts: proxmox
+  gather_facts: false
+
+  pre_tasks:
+    - name: Wait for SSH connection
+      ansible.builtin.wait_for_connection:
+        timeout: 60
+
+  tasks:
+    - name: Create media directory structure
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - /mnt/nas/media/downloads
+        - /mnt/nas/media/downloads/complete
+        - /mnt/nas/media/downloads/complete/tv
+        - /mnt/nas/media/downloads/complete/movies
+        - /mnt/nas/media/tv
+        - /mnt/nas/media/movies
+        - /mnt/nas/media/music
+
+# =============================================================
+# Play 2: Docker host — deploy compose stack
+# =============================================================
 - name: Deploy core services
   hosts: docker_host
   gather_facts: false
@@ -41,6 +76,12 @@
         - /mnt/data/docker/caddy/data
         - /mnt/data/docker/caddy/config
         - /mnt/data/docker/arcane/data
+        - /mnt/data/docker/jellyfin/config
+        - /mnt/data/docker/jellyfin/cache
+        - /mnt/data/docker/sonarr/config
+        - /mnt/data/docker/radarr/config
+        - /mnt/data/docker/prowlarr/config
+        - /mnt/data/docker/linkding/data
 
     # --- Copy compose files ---
 
@@ -69,6 +110,8 @@
           DOMAIN={{ secrets.domain }}
           ARCANE_ENCRYPTION_KEY={{ secrets.arcane_encryption_key }}
           ARCANE_JWT_SECRET={{ secrets.arcane_jwt_secret }}
+          LINKDING_SUPERUSER_NAME={{ secrets.linkding_superuser_name }}
+          LINKDING_SUPERUSER_PASSWORD={{ secrets.linkding_superuser_password }}
         owner: root
         group: root
         mode: "0600"
@@ -134,6 +177,72 @@
     - name: Show container status
       ansible.builtin.debug:
         var: docker_status.stdout_lines
+
+    # --- Verify app services ---
+
+    - name: Verify Jellyfin is responding
+      ansible.builtin.uri:
+        url: "http://localhost:80/"
+        headers:
+          Host: "jellyfin.{{ secrets.domain }}"
+        status_code: [200, 302]
+      register: jellyfin_check
+      retries: 3
+      delay: 5
+      until: jellyfin_check is not failed
+
+    - name: Verify Sonarr is responding
+      ansible.builtin.uri:
+        url: "http://localhost:80/"
+        headers:
+          Host: "sonarr.{{ secrets.domain }}"
+        status_code: [200, 302]
+      register: sonarr_check
+      retries: 3
+      delay: 5
+      until: sonarr_check is not failed
+
+    - name: Verify Radarr is responding
+      ansible.builtin.uri:
+        url: "http://localhost:80/"
+        headers:
+          Host: "radarr.{{ secrets.domain }}"
+        status_code: [200, 302]
+      register: radarr_check
+      retries: 3
+      delay: 5
+      until: radarr_check is not failed
+
+    - name: Verify Prowlarr is responding
+      ansible.builtin.uri:
+        url: "http://localhost:80/"
+        headers:
+          Host: "prowlarr.{{ secrets.domain }}"
+        status_code: [200, 302]
+      register: prowlarr_check
+      retries: 3
+      delay: 5
+      until: prowlarr_check is not failed
+
+    - name: Verify Linkding is responding
+      ansible.builtin.uri:
+        url: "http://localhost:80/"
+        headers:
+          Host: "links.{{ secrets.domain }}"
+        status_code: [200, 302]
+      register: linkding_check
+      retries: 3
+      delay: 5
+      until: linkding_check is not failed
+
+    - name: Verify GPU passthrough
+      ansible.builtin.command: ls -la /dev/dri/
+      register: dri_check
+      changed_when: false
+
+    - name: Show GPU devices
+      ansible.builtin.debug:
+        var: dri_check.stdout_lines
 
     # --- Arcane user setup ---
     # Arcane port is only exposed within Docker network, so we go through Caddy on port 80
