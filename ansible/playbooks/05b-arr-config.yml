@@ -1,0 +1,836 @@
+---
+# 05b-arr-config.yml
+# Configures all arr suite apps, Jellyfin, Jellyseerr, and Autobrr via their APIs.
+# Prerequisites: 03-core-services.yml must have been run (all containers up, API keys pre-seeded).
+#
+# What this playbook does:
+#   - Sonarr:     root folder, download client, remote path mapping
+#   - Radarr:     root folder, download client, remote path mapping
+#   - Prowlarr:   connects to Sonarr, Radarr, Lidarr as applications
+#   - Lidarr:     root folder, download client, remote path mapping
+#   - Jellyfin:   initial setup wizard, media libraries, VAAPI transcoding
+#   - Jellyseerr: initial setup (connect to Jellyfin + Sonarr + Radarr)
+#   - Autobrr:    create account, add download client
+#
+# What stays manual:
+#   - Prowlarr indexers (tracker credentials)
+#   - Autobrr IRC networks + filters (tracker-specific)
+#   - Jellyfin transcoding fine-tuning
+#   - Jellyseerr user management
+
+- name: Configure arr suite and media services
+  hosts: docker_host
+  gather_facts: false
+
+  vars:
+    secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../../docker/secrets.sops.yml') | from_yaml }}"
+    seedbox: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/seedbox.sops.yml') | from_yaml }}"
+
+    # Localhost API endpoints (via port bindings)
+    sonarr_url: "http://127.0.0.1:8989"
+    radarr_url: "http://127.0.0.1:7878"
+    prowlarr_url: "http://127.0.0.1:9696"
+    lidarr_url: "http://127.0.0.1:8686"
+    jellyfin_url: "http://127.0.0.1:8096"
+    jellyseerr_url: "http://127.0.0.1:5055"
+    autobrr_url: "http://127.0.0.1:7474"
+
+    # Seedbox qBittorrent config
+    seedbox_qbit_host: "{{ seedbox.seedbox_host }}"
+    seedbox_qbit_port: 13291
+    seedbox_qbit_user: "{{ seedbox.seedbox_user }}"
+    seedbox_qbit_password: "{{ seedbox.seedbox_qbit_password }}"
+    seedbox_download_path: "{{ seedbox.seedbox_remote_path }}"
+
+  pre_tasks:
+    - name: Wait for SSH connection
+      ansible.builtin.wait_for_connection:
+        timeout: 60
+
+  tasks:
+
+    # ================================================================
+    # SONARR — root folder, download client, remote path mapping
+    # ================================================================
+
+    - name: Sonarr — check root folders
+      ansible.builtin.uri:
+        url: "{{ sonarr_url }}/api/v3/rootfolder"
+        headers:
+          X-Api-Key: "{{ secrets.sonarr_api_key }}"
+      register: sonarr_root_folders
+
+    - name: Sonarr — add root folder
+      ansible.builtin.uri:
+        url: "{{ sonarr_url }}/api/v3/rootfolder"
+        method: POST
+        headers:
+          X-Api-Key: "{{ secrets.sonarr_api_key }}"
+        body_format: json
+        body:
+          path: /media/tv
+        status_code: [200, 201]
+      when: sonarr_root_folders.json | selectattr('path', 'equalto', '/media/tv') | list | length == 0
+
+    - name: Sonarr — check download clients
+      ansible.builtin.uri:
+        url: "{{ sonarr_url }}/api/v3/downloadclient"
+        headers:
+          X-Api-Key: "{{ secrets.sonarr_api_key }}"
+      register: sonarr_download_clients
+
+    - name: Sonarr — add qBittorrent download client
+      ansible.builtin.uri:
+        url: "{{ sonarr_url }}/api/v3/downloadclient"
+        method: POST
+        headers:
+          X-Api-Key: "{{ secrets.sonarr_api_key }}"
+        body_format: json
+        body:
+          name: Seedbox
+          implementation: QBittorrent
+          configContract: QBittorrentSettings
+          protocol: torrent
+          enable: true
+          priority: 1
+          removeCompletedDownloads: false
+          removeFailedDownloads: true
+          fields:
+            - name: host
+              value: "{{ seedbox_qbit_host }}"
+            - name: port
+              value: "{{ seedbox_qbit_port }}"
+            - name: username
+              value: "{{ seedbox_qbit_user }}"
+            - name: password
+              value: "{{ seedbox_qbit_password }}"
+            - name: tvCategory
+              value: tv
+            - name: useSsl
+              value: false
+        status_code: [200, 201]
+      when: sonarr_download_clients.json | selectattr('name', 'equalto', 'Seedbox') | list | length == 0
+      no_log: true
+
+    - name: Sonarr — check remote path mappings
+      ansible.builtin.uri:
+        url: "{{ sonarr_url }}/api/v3/remotepathmapping"
+        headers:
+          X-Api-Key: "{{ secrets.sonarr_api_key }}"
+      register: sonarr_remote_paths
+
+    - name: Sonarr — add remote path mapping
+      ansible.builtin.uri:
+        url: "{{ sonarr_url }}/api/v3/remotepathmapping"
+        method: POST
+        headers:
+          X-Api-Key: "{{ secrets.sonarr_api_key }}"
+        body_format: json
+        body:
+          host: "{{ seedbox_qbit_host }}"
+          remotePath: "{{ seedbox_download_path }}/tv/"
+          localPath: /media/downloads/complete/tv/
+        status_code: [200, 201]
+      when: sonarr_remote_paths.json | selectattr('host', 'equalto', seedbox_qbit_host) | list | length == 0
+
+    # ================================================================
+    # RADARR — root folder, download client, remote path mapping
+    # ================================================================
+
+    - name: Radarr — check root folders
+      ansible.builtin.uri:
+        url: "{{ radarr_url }}/api/v3/rootfolder"
+        headers:
+          X-Api-Key: "{{ secrets.radarr_api_key }}"
+      register: radarr_root_folders
+
+    - name: Radarr — add root folder
+      ansible.builtin.uri:
+        url: "{{ radarr_url }}/api/v3/rootfolder"
+        method: POST
+        headers:
+          X-Api-Key: "{{ secrets.radarr_api_key }}"
+        body_format: json
+        body:
+          path: /media/movies
+        status_code: [200, 201]
+      when: radarr_root_folders.json | selectattr('path', 'equalto', '/media/movies') | list | length == 0
+
+    - name: Radarr — check download clients
+      ansible.builtin.uri:
+        url: "{{ radarr_url }}/api/v3/downloadclient"
+        headers:
+          X-Api-Key: "{{ secrets.radarr_api_key }}"
+      register: radarr_download_clients
+
+    - name: Radarr — add qBittorrent download client
+      ansible.builtin.uri:
+        url: "{{ radarr_url }}/api/v3/downloadclient"
+        method: POST
+        headers:
+          X-Api-Key: "{{ secrets.radarr_api_key }}"
+        body_format: json
+        body:
+          name: Seedbox
+          implementation: QBittorrent
+          configContract: QBittorrentSettings
+          protocol: torrent
+          enable: true
+          priority: 1
+          removeCompletedDownloads: false
+          removeFailedDownloads: true
+          fields:
+            - name: host
+              value: "{{ seedbox_qbit_host }}"
+            - name: port
+              value: "{{ seedbox_qbit_port }}"
+            - name: username
+              value: "{{ seedbox_qbit_user }}"
+            - name: password
+              value: "{{ seedbox_qbit_password }}"
+            - name: movieCategory
+              value: movies
+            - name: useSsl
+              value: false
+        status_code: [200, 201]
+      when: radarr_download_clients.json | selectattr('name', 'equalto', 'Seedbox') | list | length == 0
+      no_log: true
+
+    - name: Radarr — check remote path mappings
+      ansible.builtin.uri:
+        url: "{{ radarr_url }}/api/v3/remotepathmapping"
+        headers:
+          X-Api-Key: "{{ secrets.radarr_api_key }}"
+      register: radarr_remote_paths
+
+    - name: Radarr — add remote path mapping
+      ansible.builtin.uri:
+        url: "{{ radarr_url }}/api/v3/remotepathmapping"
+        method: POST
+        headers:
+          X-Api-Key: "{{ secrets.radarr_api_key }}"
+        body_format: json
+        body:
+          host: "{{ seedbox_qbit_host }}"
+          remotePath: "{{ seedbox_download_path }}/movies/"
+          localPath: /media/downloads/complete/movies/
+        status_code: [200, 201]
+      when: radarr_remote_paths.json | selectattr('host', 'equalto', seedbox_qbit_host) | list | length == 0
+
+    # ================================================================
+    # PROWLARR — connect to Sonarr, Radarr, Lidarr
+    # ================================================================
+
+    - name: Prowlarr — check existing applications
+      ansible.builtin.uri:
+        url: "{{ prowlarr_url }}/api/v1/applications"
+        headers:
+          X-Api-Key: "{{ secrets.prowlarr_api_key }}"
+      register: prowlarr_apps
+
+    - name: Prowlarr — add Sonarr application
+      ansible.builtin.uri:
+        url: "{{ prowlarr_url }}/api/v1/applications"
+        method: POST
+        headers:
+          X-Api-Key: "{{ secrets.prowlarr_api_key }}"
+        body_format: json
+        body:
+          name: Sonarr
+          implementation: Sonarr
+          configContract: SonarrSettings
+          syncLevel: fullSync
+          tags: []
+          fields:
+            - name: prowlarrUrl
+              value: "http://prowlarr:9696"
+            - name: baseUrl
+              value: "http://sonarr:8989"
+            - name: apiKey
+              value: "{{ secrets.sonarr_api_key }}"
+            - name: syncCategories
+              value:
+                - 5000
+                - 5010
+                - 5020
+                - 5030
+                - 5040
+                - 5045
+                - 5050
+                - 5060
+                - 5070
+                - 5080
+            - name: syncRejectBlocklistedTorrentHashesWhileGrabbing
+              value: false
+        status_code: [200, 201]
+      when: prowlarr_apps.json | selectattr('name', 'equalto', 'Sonarr') | list | length == 0
+      no_log: true
+
+    - name: Prowlarr — add Radarr application
+      ansible.builtin.uri:
+        url: "{{ prowlarr_url }}/api/v1/applications"
+        method: POST
+        headers:
+          X-Api-Key: "{{ secrets.prowlarr_api_key }}"
+        body_format: json
+        body:
+          name: Radarr
+          implementation: Radarr
+          configContract: RadarrSettings
+          syncLevel: fullSync
+          tags: []
+          fields:
+            - name: prowlarrUrl
+              value: "http://prowlarr:9696"
+            - name: baseUrl
+              value: "http://radarr:7878"
+            - name: apiKey
+              value: "{{ secrets.radarr_api_key }}"
+            - name: syncCategories
+              value:
+                - 2000
+                - 2010
+                - 2020
+                - 2030
+                - 2040
+                - 2045
+                - 2050
+                - 2060
+                - 2070
+                - 2080
+            - name: syncRejectBlocklistedTorrentHashesWhileGrabbing
+              value: false
+        status_code: [200, 201]
+      when: prowlarr_apps.json | selectattr('name', 'equalto', 'Radarr') | list | length == 0
+      no_log: true
+
+    - name: Prowlarr — add Lidarr application
+      ansible.builtin.uri:
+        url: "{{ prowlarr_url }}/api/v1/applications"
+        method: POST
+        headers:
+          X-Api-Key: "{{ secrets.prowlarr_api_key }}"
+        body_format: json
+        body:
+          name: Lidarr
+          implementation: Lidarr
+          configContract: LidarrSettings
+          syncLevel: fullSync
+          tags: []
+          fields:
+            - name: prowlarrUrl
+              value: "http://prowlarr:9696"
+            - name: baseUrl
+              value: "http://lidarr:8686"
+            - name: apiKey
+              value: "{{ secrets.lidarr_api_key }}"
+            - name: syncCategories
+              value:
+                - 3000
+                - 3010
+                - 3020
+                - 3030
+                - 3040
+            - name: syncRejectBlocklistedTorrentHashesWhileGrabbing
+              value: false
+        status_code: [200, 201]
+      when: prowlarr_apps.json | selectattr('name', 'equalto', 'Lidarr') | list | length == 0
+      no_log: true
+
+    # ================================================================
+    # LIDARR — root folder, download client, remote path mapping
+    # ================================================================
+
+    - name: Lidarr — check root folders
+      ansible.builtin.uri:
+        url: "{{ lidarr_url }}/api/v1/rootfolder"
+        headers:
+          X-Api-Key: "{{ secrets.lidarr_api_key }}"
+      register: lidarr_root_folders
+
+    - name: Lidarr — add root folder
+      ansible.builtin.uri:
+        url: "{{ lidarr_url }}/api/v1/rootfolder"
+        method: POST
+        headers:
+          X-Api-Key: "{{ secrets.lidarr_api_key }}"
+        body_format: json
+        body:
+          name: Music
+          path: /media/music
+          defaultMetadataProfileId: 1
+          defaultQualityProfileId: 1
+          defaultMonitorOption: all
+        status_code: [200, 201]
+      when: lidarr_root_folders.json | selectattr('path', 'equalto', '/media/music') | list | length == 0
+
+    - name: Lidarr — check download clients
+      ansible.builtin.uri:
+        url: "{{ lidarr_url }}/api/v1/downloadclient"
+        headers:
+          X-Api-Key: "{{ secrets.lidarr_api_key }}"
+      register: lidarr_download_clients
+
+    - name: Lidarr — add qBittorrent download client
+      ansible.builtin.uri:
+        url: "{{ lidarr_url }}/api/v1/downloadclient"
+        method: POST
+        headers:
+          X-Api-Key: "{{ secrets.lidarr_api_key }}"
+        body_format: json
+        body:
+          name: Seedbox
+          implementation: QBittorrent
+          configContract: QBittorrentSettings
+          protocol: torrent
+          enable: true
+          priority: 1
+          removeCompletedDownloads: false
+          removeFailedDownloads: true
+          fields:
+            - name: host
+              value: "{{ seedbox_qbit_host }}"
+            - name: port
+              value: "{{ seedbox_qbit_port }}"
+            - name: username
+              value: "{{ seedbox_qbit_user }}"
+            - name: password
+              value: "{{ seedbox_qbit_password }}"
+            - name: musicCategory
+              value: music
+            - name: useSsl
+              value: false
+        status_code: [200, 201]
+      when: lidarr_download_clients.json | selectattr('name', 'equalto', 'Seedbox') | list | length == 0
+      no_log: true
+
+    - name: Lidarr — check remote path mappings
+      ansible.builtin.uri:
+        url: "{{ lidarr_url }}/api/v1/remotepathmapping"
+        headers:
+          X-Api-Key: "{{ secrets.lidarr_api_key }}"
+      register: lidarr_remote_paths
+
+    - name: Lidarr — add remote path mapping
+      ansible.builtin.uri:
+        url: "{{ lidarr_url }}/api/v1/remotepathmapping"
+        method: POST
+        headers:
+          X-Api-Key: "{{ secrets.lidarr_api_key }}"
+        body_format: json
+        body:
+          host: "{{ seedbox_qbit_host }}"
+          remotePath: "{{ seedbox_download_path }}/music/"
+          localPath: /media/downloads/complete/music/
+        status_code: [200, 201]
+      when: lidarr_remote_paths.json | selectattr('host', 'equalto', seedbox_qbit_host) | list | length == 0
+
+    # ================================================================
+    # JELLYFIN — initial setup wizard
+    # ================================================================
+
+    - name: Jellyfin — try to authenticate (check if wizard already completed)
+      ansible.builtin.uri:
+        url: "{{ jellyfin_url }}/Users/AuthenticateByName"
+        method: POST
+        headers:
+          Authorization: 'MediaBrowser Client="Ansible", Device="homelab", DeviceId="ansible-config", Version="1.0.0"'
+        body_format: json
+        body:
+          Username: "{{ secrets.jellyfin_admin_user }}"
+          Pw: "{{ secrets.jellyfin_admin_password }}"
+        status_code: [200, 401]
+      register: jellyfin_pre_auth
+      no_log: true
+
+    - name: Jellyfin — initial setup
+      when: jellyfin_pre_auth.status == 401
+      block:
+        - name: Jellyfin — set startup configuration
+          ansible.builtin.uri:
+            url: "{{ jellyfin_url }}/Startup/Configuration"
+            method: POST
+            body_format: json
+            body:
+              UICulture: en-US
+              MetadataCountryCode: BE
+              PreferredMetadataLanguage: en
+            status_code: [200, 204]
+
+        - name: Jellyfin — create admin user
+          ansible.builtin.uri:
+            url: "{{ jellyfin_url }}/Startup/User"
+            method: POST
+            body_format: json
+            body:
+              Name: "{{ secrets.jellyfin_admin_user }}"
+              Password: "{{ secrets.jellyfin_admin_password }}"
+            status_code: [200, 204]
+          no_log: true
+
+        - name: Jellyfin — set remote access
+          ansible.builtin.uri:
+            url: "{{ jellyfin_url }}/Startup/RemoteAccess"
+            method: POST
+            body_format: json
+            body:
+              EnableRemoteAccess: true
+              EnableAutomaticPortMapping: false
+            status_code: [200, 204]
+
+        - name: Jellyfin — complete startup wizard
+          ansible.builtin.uri:
+            url: "{{ jellyfin_url }}/Startup/Complete"
+            method: POST
+            status_code: [200, 204]
+
+    - name: Jellyfin — authenticate
+      ansible.builtin.uri:
+        url: "{{ jellyfin_url }}/Users/AuthenticateByName"
+        method: POST
+        headers:
+          Authorization: 'MediaBrowser Client="Ansible", Device="homelab", DeviceId="ansible-config", Version="1.0.0"'
+        body_format: json
+        body:
+          Username: "{{ secrets.jellyfin_admin_user }}"
+          Pw: "{{ secrets.jellyfin_admin_password }}"
+      register: jellyfin_auth
+      no_log: true
+
+    - name: Jellyfin — get existing libraries
+      ansible.builtin.uri:
+        url: "{{ jellyfin_url }}/Library/VirtualFolders"
+        headers:
+          Authorization: 'MediaBrowser Client="Ansible", Device="homelab", DeviceId="ansible-config", Version="1.0.0", Token="{{ jellyfin_auth.json.AccessToken }}"'
+      register: jellyfin_libraries
+
+    - name: Jellyfin — add Movies library
+      ansible.builtin.uri:
+        url: "{{ jellyfin_url }}/Library/VirtualFolders?collectionType=movies&refreshLibrary=false&name=Movies"
+        method: POST
+        headers:
+          Authorization: 'MediaBrowser Client="Ansible", Device="homelab", DeviceId="ansible-config", Version="1.0.0", Token="{{ jellyfin_auth.json.AccessToken }}"'
+        body_format: json
+        body:
+          LibraryOptions: {}
+        status_code: [200, 204]
+      when: jellyfin_libraries.json | selectattr('Name', 'equalto', 'Movies') | list | length == 0
+
+    - name: Jellyfin — add paths to Movies library
+      ansible.builtin.uri:
+        url: "{{ jellyfin_url }}/Library/VirtualFolders/Paths"
+        method: POST
+        headers:
+          Authorization: 'MediaBrowser Client="Ansible", Device="homelab", DeviceId="ansible-config", Version="1.0.0", Token="{{ jellyfin_auth.json.AccessToken }}"'
+        body_format: json
+        body:
+          Name: Movies
+          PathInfo:
+            Path: /media/movies
+        status_code: [200, 204]
+      when: jellyfin_libraries.json | selectattr('Name', 'equalto', 'Movies') | list | length == 0
+
+    - name: Jellyfin — add TV Shows library
+      ansible.builtin.uri:
+        url: "{{ jellyfin_url }}/Library/VirtualFolders?collectionType=tvshows&refreshLibrary=false&name=TV%20Shows"
+        method: POST
+        headers:
+          Authorization: 'MediaBrowser Client="Ansible", Device="homelab", DeviceId="ansible-config", Version="1.0.0", Token="{{ jellyfin_auth.json.AccessToken }}"'
+        body_format: json
+        body:
+          LibraryOptions: {}
+        status_code: [200, 204]
+      when: jellyfin_libraries.json | selectattr('Name', 'equalto', 'TV Shows') | list | length == 0
+
+    - name: Jellyfin — add paths to TV Shows library
+      ansible.builtin.uri:
+        url: "{{ jellyfin_url }}/Library/VirtualFolders/Paths"
+        method: POST
+        headers:
+          Authorization: 'MediaBrowser Client="Ansible", Device="homelab", DeviceId="ansible-config", Version="1.0.0", Token="{{ jellyfin_auth.json.AccessToken }}"'
+        body_format: json
+        body:
+          Name: TV Shows
+          PathInfo:
+            Path: /media/tv
+        status_code: [200, 204]
+      when: jellyfin_libraries.json | selectattr('Name', 'equalto', 'TV Shows') | list | length == 0
+
+    - name: Jellyfin — add Music library
+      ansible.builtin.uri:
+        url: "{{ jellyfin_url }}/Library/VirtualFolders?collectionType=music&refreshLibrary=false&name=Music"
+        method: POST
+        headers:
+          Authorization: 'MediaBrowser Client="Ansible", Device="homelab", DeviceId="ansible-config", Version="1.0.0", Token="{{ jellyfin_auth.json.AccessToken }}"'
+        body_format: json
+        body:
+          LibraryOptions: {}
+        status_code: [200, 204]
+      when: jellyfin_libraries.json | selectattr('Name', 'equalto', 'Music') | list | length == 0
+
+    - name: Jellyfin — add paths to Music library
+      ansible.builtin.uri:
+        url: "{{ jellyfin_url }}/Library/VirtualFolders/Paths"
+        method: POST
+        headers:
+          Authorization: 'MediaBrowser Client="Ansible", Device="homelab", DeviceId="ansible-config", Version="1.0.0", Token="{{ jellyfin_auth.json.AccessToken }}"'
+        body_format: json
+        body:
+          Name: Music
+          PathInfo:
+            Path: /media/music
+        status_code: [200, 204]
+      when: jellyfin_libraries.json | selectattr('Name', 'equalto', 'Music') | list | length == 0
+
+    - name: Jellyfin — get encoding settings
+      ansible.builtin.uri:
+        url: "{{ jellyfin_url }}/System/Configuration/encoding"
+        headers:
+          Authorization: 'MediaBrowser Client="Ansible", Device="homelab", DeviceId="ansible-config", Version="1.0.0", Token="{{ jellyfin_auth.json.AccessToken }}"'
+      register: jellyfin_encoding
+
+    - name: Jellyfin — enable VAAPI hardware transcoding
+      ansible.builtin.uri:
+        url: "{{ jellyfin_url }}/System/Configuration/encoding"
+        method: POST
+        headers:
+          Authorization: 'MediaBrowser Client="Ansible", Device="homelab", DeviceId="ansible-config", Version="1.0.0", Token="{{ jellyfin_auth.json.AccessToken }}"'
+        body_format: json
+        body: "{{ jellyfin_encoding.json | combine({'HardwareAccelerationType': 'vaapi', 'VaapiDevice': '/dev/dri/renderD128', 'EnableHardwareEncoding': true, 'EnableTonemapping': true}) }}"
+        status_code: [200, 204]
+      when: jellyfin_encoding.json.HardwareAccelerationType != 'vaapi'
+
+    # ================================================================
+    # JELLYSEERR — initial setup + configuration
+    # ================================================================
+
+    - name: Jellyseerr — check if setup is needed
+      ansible.builtin.uri:
+        url: "{{ jellyseerr_url }}/api/v1/settings/public"
+      register: jellyseerr_check
+
+    - name: Jellyseerr — initial setup
+      when: not (jellyseerr_check.json.initialized | default(false))
+      block:
+        - name: Jellyseerr — create admin via Jellyfin auth
+          ansible.builtin.uri:
+            url: "{{ jellyseerr_url }}/api/v1/auth/jellyfin"
+            method: POST
+            body_format: json
+            body:
+              username: "{{ secrets.jellyfin_admin_user }}"
+              password: "{{ secrets.jellyfin_admin_password }}"
+              hostname: jellyfin
+              port: 8096
+              useSsl: false
+              urlBase: ""
+              email: "admin@{{ secrets.domain }}"
+              serverType: 2
+          register: jellyseerr_admin_create
+          no_log: true
+
+        - name: Jellyseerr — read auto-generated API key
+          ansible.builtin.uri:
+            url: "{{ jellyseerr_url }}/api/v1/settings/main"
+            headers:
+              Cookie: "{{ jellyseerr_admin_create.cookies_string }}"
+          register: jellyseerr_settings
+
+        - name: Jellyseerr — store API key
+          ansible.builtin.set_fact:
+            jellyseerr_api_key: "{{ jellyseerr_settings.json.apiKey }}"
+
+        - name: Jellyseerr — sync Jellyfin libraries
+          ansible.builtin.uri:
+            url: "{{ jellyseerr_url }}/api/v1/settings/jellyfin/library?sync=true"
+            headers:
+              X-Api-Key: "{{ jellyseerr_api_key }}"
+          register: jellyseerr_libraries
+
+        - name: Jellyseerr — enable all Jellyfin libraries
+          ansible.builtin.uri:
+            url: "{{ jellyseerr_url }}/api/v1/settings/jellyfin/library?enable={{ jellyseerr_libraries.json | map(attribute='id') | join(',') }}"
+            headers:
+              X-Api-Key: "{{ jellyseerr_api_key }}"
+
+        - name: Jellyseerr — initialize
+          ansible.builtin.uri:
+            url: "{{ jellyseerr_url }}/api/v1/settings/initialize"
+            method: POST
+            headers:
+              X-Api-Key: "{{ jellyseerr_api_key }}"
+
+    - name: Jellyseerr — get API key (existing install)
+      ansible.builtin.uri:
+        url: "{{ jellyseerr_url }}/api/v1/auth/jellyfin"
+        method: POST
+        body_format: json
+        body:
+          username: "{{ secrets.jellyfin_admin_user }}"
+          password: "{{ secrets.jellyfin_admin_password }}"
+      register: jellyseerr_existing_login
+      when: jellyseerr_check.json.initialized | default(false)
+      no_log: true
+
+    - name: Jellyseerr — read API key from existing install
+      ansible.builtin.uri:
+        url: "{{ jellyseerr_url }}/api/v1/settings/main"
+        headers:
+          Cookie: "{{ jellyseerr_existing_login.cookies_string }}"
+      register: jellyseerr_existing_settings
+      when: jellyseerr_check.json.initialized | default(false)
+
+    - name: Jellyseerr — store API key (existing install)
+      ansible.builtin.set_fact:
+        jellyseerr_api_key: "{{ jellyseerr_existing_settings.json.apiKey }}"
+      when: jellyseerr_check.json.initialized | default(false)
+
+    - name: Jellyseerr — get existing Sonarr config
+      ansible.builtin.uri:
+        url: "{{ jellyseerr_url }}/api/v1/settings/sonarr"
+        headers:
+          X-Api-Key: "{{ jellyseerr_api_key }}"
+      register: jellyseerr_sonarr
+
+    - name: Jellyseerr — add Sonarr
+      ansible.builtin.uri:
+        url: "{{ jellyseerr_url }}/api/v1/settings/sonarr"
+        method: POST
+        headers:
+          X-Api-Key: "{{ jellyseerr_api_key }}"
+        body_format: json
+        body:
+          name: Sonarr
+          hostname: sonarr
+          port: 8989
+          useSsl: false
+          apiKey: "{{ secrets.sonarr_api_key }}"
+          activeProfileId: 1
+          activeProfileName: Any
+          activeDirectory: /media/tv
+          is4k: false
+          isDefault: true
+          enableSeasonFolders: true
+        status_code: [200, 201]
+      when: jellyseerr_sonarr.json | default([]) | selectattr('name', 'equalto', 'Sonarr') | list | length == 0
+      no_log: true
+
+    - name: Jellyseerr — get existing Radarr config
+      ansible.builtin.uri:
+        url: "{{ jellyseerr_url }}/api/v1/settings/radarr"
+        headers:
+          X-Api-Key: "{{ jellyseerr_api_key }}"
+      register: jellyseerr_radarr
+
+    - name: Jellyseerr — add Radarr
+      ansible.builtin.uri:
+        url: "{{ jellyseerr_url }}/api/v1/settings/radarr"
+        method: POST
+        headers:
+          X-Api-Key: "{{ jellyseerr_api_key }}"
+        body_format: json
+        body:
+          name: Radarr
+          hostname: radarr
+          port: 7878
+          useSsl: false
+          apiKey: "{{ secrets.radarr_api_key }}"
+          activeProfileId: 1
+          activeProfileName: Any
+          activeDirectory: /media/movies
+          is4k: false
+          isDefault: true
+          minimumAvailability: released
+        status_code: [200, 201]
+      when: jellyseerr_radarr.json | default([]) | selectattr('name', 'equalto', 'Radarr') | list | length == 0
+      no_log: true
+
+    # ================================================================
+    # AUTOBRR — create account, add download client
+    # ================================================================
+
+    - name: Autobrr — check if account exists
+      ansible.builtin.uri:
+        url: "{{ autobrr_url }}/api/auth/login"
+        method: POST
+        body_format: json
+        body:
+          username: "{{ secrets.jellyseerr_admin_user }}"
+          password: "{{ secrets.jellyseerr_admin_password }}"
+        status_code: [200, 204, 401, 403, 422]
+      register: autobrr_login_check
+      ignore_errors: true
+
+    - name: Autobrr — create initial account
+      ansible.builtin.uri:
+        url: "{{ autobrr_url }}/api/auth/onboard"
+        method: POST
+        body_format: json
+        body:
+          username: "{{ secrets.jellyseerr_admin_user }}"
+          password: "{{ secrets.jellyseerr_admin_password }}"
+        status_code: [200, 201, 204, 422]
+      when: autobrr_login_check.status in [401, 403]
+      no_log: true
+
+    - name: Autobrr — login
+      ansible.builtin.uri:
+        url: "{{ autobrr_url }}/api/auth/login"
+        method: POST
+        body_format: json
+        body:
+          username: "{{ secrets.jellyseerr_admin_user }}"
+          password: "{{ secrets.jellyseerr_admin_password }}"
+        status_code: [200, 204]
+      register: autobrr_login
+      no_log: true
+
+    - name: Autobrr — get existing download clients
+      ansible.builtin.uri:
+        url: "{{ autobrr_url }}/api/download_clients"
+        headers:
+          Cookie: "{{ autobrr_login.cookies_string }}"
+      register: autobrr_clients
+
+    - name: Autobrr — add qBittorrent download client
+      ansible.builtin.uri:
+        url: "{{ autobrr_url }}/api/download_clients"
+        method: POST
+        headers:
+          Cookie: "{{ autobrr_login.cookies_string }}"
+        body_format: json
+        body:
+          name: Seedbox
+          type: QBITTORRENT
+          enabled: true
+          host: "http://{{ seedbox_qbit_host }}:{{ seedbox_qbit_port }}"
+          settings:
+            basic:
+              auth: true
+              username: "{{ seedbox_qbit_user }}"
+              password: "{{ seedbox_qbit_password }}"
+            rules: {}
+        status_code: [200, 201]
+      when: autobrr_clients.json | default([]) | selectattr('name', 'equalto', 'Seedbox') | list | length == 0
+      no_log: true
+
+    # ================================================================
+    # Summary
+    # ================================================================
+
+    - name: Configuration complete
+      ansible.builtin.debug:
+        msg:
+          - "Configuration complete!"
+          - "Sonarr: root folder /media/tv, download client configured, remote path mapping set"
+          - "Radarr: root folder /media/movies, download client configured, remote path mapping set"
+          - "Prowlarr: connected to Sonarr, Radarr, Lidarr"
+          - "Lidarr: root folder /media/music, download client configured, remote path mapping set"
+          - "Jellyfin: setup wizard completed, libraries added, VAAPI transcoding enabled"
+          - "Jellyseerr: connected to Jellyfin, Sonarr, Radarr"
+          - "Autobrr: account created, qBittorrent download client added"
+          - ""
+          - "Manual steps remaining:"
+          - "  - Prowlarr: add indexers (tracker credentials needed)"
+          - "  - Autobrr: add IRC networks + filters (tracker-specific)"
+          - "  - Jellyfin: fine-tune transcoding settings if needed"

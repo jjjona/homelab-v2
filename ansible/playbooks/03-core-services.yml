@@ -5,11 +5,14 @@
 #   - cloudflared (Cloudflare Tunnel)
 #   - Arcane (Docker management UI)
 #   - Jellyfin (media streaming, VAAPI transcoding)
-#   - Sonarr, Radarr, Prowlarr (arr suite)
+#   - Sonarr, Radarr, Prowlarr, Lidarr (arr suite)
+#   - Jellyseerr (media requests)
+#   - Autobrr (automation)
 #   - Linkding (bookmark manager)
 #
 # Decrypts SOPS secrets, copies files, templates config, runs compose up.
 # Re-runnable: each run copies latest files and recreates containers.
+# Config.xml pre-seeding only runs on first deploy (won't overwrite app configs).
 
 # =============================================================
 # Play 1: Proxmox host — create media directory structure on ZFS
@@ -28,14 +31,15 @@
       ansible.builtin.file:
         path: "{{ item }}"
         state: directory
-        owner: root
-        group: root
+        owner: "100000"
+        group: "100000"
         mode: "0755"
       loop:
         - /mnt/nas/media/downloads
         - /mnt/nas/media/downloads/complete
         - /mnt/nas/media/downloads/complete/tv
         - /mnt/nas/media/downloads/complete/movies
+        - /mnt/nas/media/downloads/complete/music
         - /mnt/nas/media/tv
         - /mnt/nas/media/movies
         - /mnt/nas/media/music
@@ -52,7 +56,19 @@
     secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../../docker/secrets.sops.yml') | from_yaml }}"
     tunnel_creds: "{{ lookup('community.sops.sops', playbook_dir + '/../../docker/cloudflared/credentials.sops.json') }}"
     tunnel_id: "{{ (tunnel_creds | from_json).TunnelID }}"
-
+    servarr_apps:
+      - name: sonarr
+        api_key: "{{ secrets.sonarr_api_key }}"
+        port: 8989
+      - name: radarr
+        api_key: "{{ secrets.radarr_api_key }}"
+        port: 7878
+      - name: prowlarr
+        api_key: "{{ secrets.prowlarr_api_key }}"
+        port: 9696
+      - name: lidarr
+        api_key: "{{ secrets.lidarr_api_key }}"
+        port: 8686
   pre_tasks:
     - name: Wait for SSH connection
       ansible.builtin.wait_for_connection:
@@ -81,7 +97,49 @@
         - /mnt/data/docker/sonarr/config
         - /mnt/data/docker/radarr/config
         - /mnt/data/docker/prowlarr/config
+        - /mnt/data/docker/lidarr/config
+        - /mnt/data/docker/jellyseerr/config
+        - /mnt/data/docker/autobrr/config
         - /mnt/data/docker/linkding/data
+
+    # --- Pre-seed Servarr config.xml with API keys (first deploy only) ---
+
+    - name: Pre-seed config.xml for Servarr apps
+      ansible.builtin.copy:
+        dest: "/mnt/data/docker/{{ item.name }}/config/config.xml"
+        content: |
+          <Config>
+            <ApiKey>{{ item.api_key }}</ApiKey>
+            <UrlBase></UrlBase>
+            <BindAddress>*</BindAddress>
+            <Port>{{ item.port }}</Port>
+            <AuthenticationMethod>None</AuthenticationMethod>
+            <AuthenticationRequired>DisabledForLocalAddresses</AuthenticationRequired>
+          </Config>
+        owner: root
+        group: root
+        mode: "0644"
+        force: false
+      loop: "{{ servarr_apps }}"
+      loop_control:
+        label: "{{ item.name }}"
+      no_log: true
+
+    # --- Pre-seed Autobrr config.toml (first deploy only) ---
+
+    - name: Pre-seed Autobrr config.toml
+      ansible.builtin.copy:
+        dest: /mnt/data/docker/autobrr/config/config.toml
+        content: |
+          host = "0.0.0.0"
+          port = 7474
+          logLevel = "DEBUG"
+          sessionSecret = "{{ secrets.autobrr_session_secret }}"
+        owner: root
+        group: root
+        mode: "0644"
+        force: false
+      no_log: true
 
     # --- Copy compose files ---
 
@@ -155,7 +213,7 @@
 
     - name: Wait for containers to start
       ansible.builtin.pause:
-        seconds: 10
+        seconds: 15
 
     - name: Check compose status
       ansible.builtin.command:
@@ -223,6 +281,39 @@
       retries: 3
       delay: 5
       until: prowlarr_check is not failed
+
+    - name: Verify Lidarr is responding
+      ansible.builtin.uri:
+        url: "http://localhost:80/"
+        headers:
+          Host: "lidarr.{{ secrets.domain }}"
+        status_code: [200, 302]
+      register: lidarr_check
+      retries: 3
+      delay: 5
+      until: lidarr_check is not failed
+
+    - name: Verify Jellyseerr is responding
+      ansible.builtin.uri:
+        url: "http://localhost:80/"
+        headers:
+          Host: "jellyseerr.{{ secrets.domain }}"
+        status_code: [200, 302]
+      register: jellyseerr_check
+      retries: 3
+      delay: 5
+      until: jellyseerr_check is not failed
+
+    - name: Verify Autobrr is responding
+      ansible.builtin.uri:
+        url: "http://localhost:80/"
+        headers:
+          Host: "autobrr.{{ secrets.domain }}"
+        status_code: [200, 302]
+      register: autobrr_check
+      retries: 3
+      delay: 5
+      until: autobrr_check is not failed
 
     - name: Verify Linkding is responding
       ansible.builtin.uri:

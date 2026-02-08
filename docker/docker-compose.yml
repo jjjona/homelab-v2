@@ -46,6 +46,8 @@ services:
   jellyfin:
     image: linuxserver/jellyfin:latest
     container_name: jellyfin
+    ports:
+      - "127.0.0.1:8096:8096"
     environment:
       - PUID=0
       - PGID=0
@@ -63,6 +65,8 @@ services:
   sonarr:
     image: linuxserver/sonarr:latest
     container_name: sonarr
+    ports:
+      - "127.0.0.1:8989:8989"
     environment:
       - PUID=0
       - PGID=0
@@ -77,6 +81,8 @@ services:
   radarr:
     image: linuxserver/radarr:latest
     container_name: radarr
+    ports:
+      - "127.0.0.1:7878:7878"
     environment:
       - PUID=0
       - PGID=0
@@ -91,12 +97,56 @@ services:
   prowlarr:
     image: linuxserver/prowlarr:latest
     container_name: prowlarr
+    ports:
+      - "127.0.0.1:9696:9696"
     environment:
       - PUID=0
       - PGID=0
       - TZ=Europe/Brussels
     volumes:
       - /mnt/data/docker/prowlarr/config:/config
+    restart: unless-stopped
+    networks:
+      - web
+
+  lidarr:
+    image: linuxserver/lidarr:latest
+    container_name: lidarr
+    ports:
+      - "127.0.0.1:8686:8686"
+    environment:
+      - PUID=0
+      - PGID=0
+      - TZ=Europe/Brussels
+    volumes:
+      - /mnt/data/docker/lidarr/config:/config
+      - /mnt/nas/media:/media
+    restart: unless-stopped
+    networks:
+      - web
+
+  jellyseerr:
+    image: fallenbagel/jellyseerr:latest
+    container_name: jellyseerr
+    ports:
+      - "127.0.0.1:5055:5055"
+    environment:
+      - TZ=Europe/Brussels
+    volumes:
+      - /mnt/data/docker/jellyseerr/config:/app/config
+    restart: unless-stopped
+    networks:
+      - web
+
+  autobrr:
+    image: ghcr.io/autobrr/autobrr:latest
+    container_name: autobrr
+    ports:
+      - "127.0.0.1:7474:7474"
+    environment:
+      - TZ=Europe/Brussels
+    volumes:
+      - /mnt/data/docker/autobrr/config:/config
     restart: unless-stopped
     networks:
       - web

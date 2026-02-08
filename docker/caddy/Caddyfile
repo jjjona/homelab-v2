@@ -27,6 +27,18 @@ http://prowlarr.{$DOMAIN} {
 	reverse_proxy prowlarr:9696
 }
 
+http://lidarr.{$DOMAIN} {
+	reverse_proxy lidarr:8686
+}
+
+http://jellyseerr.{$DOMAIN} {
+	reverse_proxy jellyseerr:5055
+}
+
+http://autobrr.{$DOMAIN} {
+	reverse_proxy autobrr:7474
+}
+
 http://links.{$DOMAIN} {
 	reverse_proxy linkding:9090
 }
