@@ -166,6 +166,36 @@
           lxc.cgroup2.devices.allow: c 226:* rwm
           lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir
 
+    # --- TUN device passthrough (for Gluetun VPN) ---
+
+    - name: Add TUN device passthrough to LXC config
+      ansible.builtin.blockinfile:
+        path: /etc/pve/lxc/{{ ct_id }}.conf
+        marker: "# {mark} TUN PASSTHROUGH"
+        block: |
+          lxc.cgroup2.devices.allow: c 10:200 rwm
+          lxc.mount.entry: /dev/net dev/net none bind,create=dir
+
+    - name: Ensure /dev/net/tun exists on host
+      ansible.builtin.command: mknod /dev/net/tun c 10 200
+      args:
+        creates: /dev/net/tun
+
+    - name: Set TUN device permissions for unprivileged LXC
+      ansible.builtin.file:
+        path: /dev/net/tun
+        owner: "100000"
+        group: "100000"
+        mode: "0660"
+
+    - name: Install udev rule for persistent TUN ownership
+      ansible.builtin.copy:
+        dest: /etc/udev/rules.d/99-tun-lxc.rules
+        content: 'KERNEL=="tun", OWNER="100000", GROUP="100000", MODE="0660"'
+        owner: root
+        group: root
+        mode: "0644"
+
     # --- Start LXC ---
 
     - name: Start LXC {{ ct_id }}

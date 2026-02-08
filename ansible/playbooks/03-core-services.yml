@@ -7,8 +7,9 @@
 #   - Jellyfin (media streaming, VAAPI transcoding)
 #   - Sonarr, Radarr, Prowlarr, Lidarr (arr suite)
 #   - Jellyseerr (media requests)
-#   - Autobrr (automation)
+#   - Autobrr (automation, behind VPN)
 #   - Linkding (bookmark manager)
+#   - Gluetun (VPN tunnel for Prowlarr + Autobrr)
 #
 # Decrypts SOPS secrets, copies files, templates config, runs compose up.
 # Re-runnable: each run copies latest files and recreates containers.
@@ -56,6 +57,7 @@
     secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../../docker/secrets.sops.yml') | from_yaml }}"
     tunnel_creds: "{{ lookup('community.sops.sops', playbook_dir + '/../../docker/cloudflared/credentials.sops.json') }}"
     tunnel_id: "{{ (tunnel_creds | from_json).TunnelID }}"
+    vpn_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../../docker/gluetun/vpn.sops.yml') | from_yaml }}"
     servarr_apps:
       - name: sonarr
         api_key: "{{ secrets.sonarr_api_key }}"
@@ -89,6 +91,7 @@
         - "{{ project_dir }}"
         - "{{ project_dir }}/caddy"
         - "{{ project_dir }}/cloudflared"
+        - "{{ project_dir }}/gluetun"
         - /mnt/data/docker/caddy/data
         - /mnt/data/docker/caddy/config
         - /mnt/data/docker/arcane/data
@@ -195,6 +198,16 @@
         group: "65532"
         mode: "0644"
 
+    # --- VPN config (Gluetun) ---
+
+    - name: Write VPN OpenVPN config
+      ansible.builtin.copy:
+        dest: "{{ project_dir }}/gluetun/custom.conf"
+        content: "{{ vpn_secrets.ovpn_config }}"
+        owner: root
+        group: root
+        mode: "0600"
+
     # --- Deploy ---
 
     - name: Pull latest images
@@ -213,7 +226,20 @@
 
     - name: Wait for containers to start
       ansible.builtin.pause:
-        seconds: 15
+        seconds: 30
+
+    - name: Wait for Gluetun VPN to be healthy
+      ansible.builtin.command:
+        cmd: docker inspect --format "{% raw %}{{.State.Health.Status}}{% endraw %}" gluetun
+      register: gluetun_health
+      retries: 12
+      delay: 10
+      until: gluetun_health.stdout == "healthy"
+      changed_when: false
+
+    - name: Show Gluetun health status
+      ansible.builtin.debug:
+        msg: "Gluetun VPN: {{ gluetun_health.stdout }}"
 
     - name: Check compose status
       ansible.builtin.command:
@@ -325,6 +351,18 @@
       retries: 3
       delay: 5
       until: linkding_check is not failed
+
+    - name: Verify VPN tunnel IP
+      ansible.builtin.command: docker exec gluetun wget -qO- https://ipinfo.io/ip
+      register: vpn_ip
+      changed_when: false
+      retries: 3
+      delay: 5
+      until: vpn_ip is not failed
+
+    - name: Show VPN tunnel IP
+      ansible.builtin.debug:
+        msg: "VPN tunnel IP: {{ vpn_ip.stdout }} (should NOT be your home IP)"
 
     - name: Verify GPU passthrough
       ansible.builtin.command: ls -la /dev/dri/

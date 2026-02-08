@@ -228,6 +228,28 @@
           X-Api-Key: "{{ secrets.prowlarr_api_key }}"
       register: prowlarr_apps
 
+    - name: Prowlarr — remove apps with old prowlarrUrl (pre-VPN)
+      ansible.builtin.uri:
+        url: "{{ prowlarr_url }}/api/v1/applications/{{ item.id }}"
+        method: DELETE
+        headers:
+          X-Api-Key: "{{ secrets.prowlarr_api_key }}"
+        status_code: [200, 204]
+      loop: "{{ prowlarr_apps.json | selectattr('fields', 'defined') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when: >-
+        item.fields | selectattr('name', 'equalto', 'prowlarrUrl')
+        | selectattr('value', 'equalto', 'http://prowlarr:9696')
+        | list | length > 0
+
+    - name: Prowlarr — refresh applications list after cleanup
+      ansible.builtin.uri:
+        url: "{{ prowlarr_url }}/api/v1/applications"
+        headers:
+          X-Api-Key: "{{ secrets.prowlarr_api_key }}"
+      register: prowlarr_apps
+
     - name: Prowlarr — add Sonarr application
       ansible.builtin.uri:
         url: "{{ prowlarr_url }}/api/v1/applications"
@@ -243,7 +265,7 @@
           tags: []
           fields:
             - name: prowlarrUrl
-              value: "http://prowlarr:9696"
+              value: "http://gluetun:9696"
             - name: baseUrl
               value: "http://sonarr:8989"
             - name: apiKey
@@ -281,7 +303,7 @@
           tags: []
           fields:
             - name: prowlarrUrl
-              value: "http://prowlarr:9696"
+              value: "http://gluetun:9696"
             - name: baseUrl
               value: "http://radarr:7878"
             - name: apiKey
@@ -319,7 +341,7 @@
           tags: []
           fields:
             - name: prowlarrUrl
-              value: "http://prowlarr:9696"
+              value: "http://gluetun:9696"
             - name: baseUrl
               value: "http://lidarr:8686"
             - name: apiKey

@@ -24,7 +24,7 @@ http://radarr.{$DOMAIN} {
 }
 
 http://prowlarr.{$DOMAIN} {
-	reverse_proxy prowlarr:9696
+	reverse_proxy gluetun:9696
 }
 
 http://lidarr.{$DOMAIN} {
@@ -36,7 +36,7 @@ http://jellyseerr.{$DOMAIN} {
 }
 
 http://autobrr.{$DOMAIN} {
-	reverse_proxy autobrr:7474
+	reverse_proxy gluetun:7474
 }
 
 http://links.{$DOMAIN} {

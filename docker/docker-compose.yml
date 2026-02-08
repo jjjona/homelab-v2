@@ -13,7 +13,8 @@ services:
     env_file: .env
     restart: unless-stopped
     networks:
-      - web
+      web:
+        ipv4_address: 172.20.0.2
 
   cloudflared:
     image: cloudflare/cloudflared:latest
@@ -24,7 +25,8 @@ services:
       - ./cloudflared/credentials.json:/etc/cloudflared/credentials.json:ro
     restart: unless-stopped
     networks:
-      - web
+      web:
+        ipv4_address: 172.20.0.3
     depends_on:
       - caddy
 
@@ -41,7 +43,8 @@ services:
       - JWT_SECRET=${ARCANE_JWT_SECRET}
     restart: unless-stopped
     networks:
-      - web
+      web:
+        ipv4_address: 172.20.0.4
 
   jellyfin:
     image: linuxserver/jellyfin:latest
@@ -60,7 +63,8 @@ services:
       - /dev/dri:/dev/dri
     restart: unless-stopped
     networks:
-      - web
+      web:
+        ipv4_address: 172.20.0.10
 
   sonarr:
     image: linuxserver/sonarr:latest
@@ -76,7 +80,8 @@ services:
       - /mnt/nas/media:/media
     restart: unless-stopped
     networks:
-      - web
+      web:
+        ipv4_address: 172.20.0.11
 
   radarr:
     image: linuxserver/radarr:latest
@@ -92,22 +97,8 @@ services:
       - /mnt/nas/media:/media
     restart: unless-stopped
     networks:
-      - web
-
-  prowlarr:
-    image: linuxserver/prowlarr:latest
-    container_name: prowlarr
-    ports:
-      - "127.0.0.1:9696:9696"
-    environment:
-      - PUID=0
-      - PGID=0
-      - TZ=Europe/Brussels
-    volumes:
-      - /mnt/data/docker/prowlarr/config:/config
-    restart: unless-stopped
-    networks:
-      - web
+      web:
+        ipv4_address: 172.20.0.12
 
   lidarr:
     image: linuxserver/lidarr:latest
@@ -123,7 +114,8 @@ services:
       - /mnt/nas/media:/media
     restart: unless-stopped
     networks:
-      - web
+      web:
+        ipv4_address: 172.20.0.13
 
   jellyseerr:
     image: fallenbagel/jellyseerr:latest
@@ -136,20 +128,8 @@ services:
       - /mnt/data/docker/jellyseerr/config:/app/config
     restart: unless-stopped
     networks:
-      - web
-
-  autobrr:
-    image: ghcr.io/autobrr/autobrr:latest
-    container_name: autobrr
-    ports:
-      - "127.0.0.1:7474:7474"
-    environment:
-      - TZ=Europe/Brussels
-    volumes:
-      - /mnt/data/docker/autobrr/config:/config
-    restart: unless-stopped
-    networks:
-      - web
+      web:
+        ipv4_address: 172.20.0.14
 
   linkding:
     image: sissbruecker/linkding:latest
@@ -162,8 +142,72 @@ services:
       - /mnt/data/docker/linkding/data:/etc/linkding/data
     restart: unless-stopped
     networks:
-      - web
+      web:
+        ipv4_address: 172.20.0.15
+
+  # --- VPN (Gluetun) ---
+
+  gluetun:
+    image: qmcgaw/gluetun:latest
+    container_name: gluetun
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    ports:
+      - "127.0.0.1:9696:9696"   # Prowlarr
+      - "127.0.0.1:7474:7474"   # Autobrr
+    environment:
+      - VPN_SERVICE_PROVIDER=custom
+      - VPN_TYPE=openvpn
+      - OPENVPN_CUSTOM_CONFIG=/gluetun/custom.conf
+      - TZ=Europe/Brussels
+      - FIREWALL_OUTBOUND_SUBNETS=172.20.0.0/24
+    volumes:
+      - ./gluetun:/gluetun:ro
+    extra_hosts:
+      - "sonarr:172.20.0.11"
+      - "radarr:172.20.0.12"
+      - "lidarr:172.20.0.13"
+      - "jellyfin:172.20.0.10"
+    restart: unless-stopped
+    networks:
+      web:
+        ipv4_address: 172.20.0.20
+
+  # --- Behind VPN (network_mode: service:gluetun) ---
+
+  prowlarr:
+    image: linuxserver/prowlarr:latest
+    container_name: prowlarr
+    environment:
+      - PUID=0
+      - PGID=0
+      - TZ=Europe/Brussels
+    volumes:
+      - /mnt/data/docker/prowlarr/config:/config
+    restart: unless-stopped
+    network_mode: "service:gluetun"
+    depends_on:
+      gluetun:
+        condition: service_healthy
+
+  autobrr:
+    image: ghcr.io/autobrr/autobrr:latest
+    container_name: autobrr
+    environment:
+      - TZ=Europe/Brussels
+    volumes:
+      - /mnt/data/docker/autobrr/config:/config
+    restart: unless-stopped
+    network_mode: "service:gluetun"
+    depends_on:
+      gluetun:
+        condition: service_healthy
 
 networks:
   web:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
