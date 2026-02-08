@@ -10,13 +10,14 @@
 #   - Lidarr:     root folder, download client, remote path mapping
 #   - Jellyfin:   initial setup wizard, media libraries, VAAPI transcoding
 #   - Jellyseerr: initial setup (connect to Jellyfin + Sonarr + Radarr)
+#   - Bazarr:     connect to Sonarr + Radarr, set English subtitles
 #   - Autobrr:    create account, add download client
 #
 # What stays manual:
-#   - Prowlarr indexers (tracker credentials)
-#   - Autobrr IRC networks + filters (tracker-specific)
 #   - Jellyfin transcoding fine-tuning
 #   - Jellyseerr user management
+#   - Bazarr: add subtitle providers (OpenSubtitles account needed)
+# See also: 05d-trackers.yml for Prowlarr indexers + Autobrr IRC/filters
 
 - name: Configure arr suite and media services
   hosts: docker_host
@@ -34,6 +35,7 @@
     jellyfin_url: "http://127.0.0.1:8096"
     jellyseerr_url: "http://127.0.0.1:5055"
     autobrr_url: "http://127.0.0.1:7474"
+    bazarr_url: "http://127.0.0.1:6767"
 
     # Seedbox qBittorrent config
     seedbox_qbit_host: "{{ seedbox.seedbox_host }}"
@@ -41,6 +43,33 @@
     seedbox_qbit_user: "{{ seedbox.seedbox_user }}"
     seedbox_qbit_password: "{{ seedbox.seedbox_qbit_password }}"
     seedbox_download_path: "{{ seedbox.seedbox_remote_path }}"
+
+    # Custom format for preferring dual audio / English dub releases
+    dual_audio_custom_format:
+      name: Dual Audio
+      includeCustomFormatWhenRenaming: false
+      specifications:
+        - name: Dual Audio
+          implementation: ReleaseTitleSpecification
+          negate: false
+          required: false
+          fields:
+            - name: value
+              value: "\\bdual[.\\s_-]?audio\\b"
+        - name: English Dub
+          implementation: ReleaseTitleSpecification
+          negate: false
+          required: false
+          fields:
+            - name: value
+              value: "\\benglish[.\\s_-]?dub(bed)?\\b"
+        - name: Multi Audio
+          implementation: ReleaseTitleSpecification
+          negate: false
+          required: false
+          fields:
+            - name: value
+              value: "\\bmulti[.\\s_-]?(audio|lang)\\b"
 
   pre_tasks:
     - name: Wait for SSH connection
@@ -128,10 +157,63 @@
         body_format: json
         body:
           host: "{{ seedbox_qbit_host }}"
-          remotePath: "{{ seedbox_download_path }}/tv/"
-          localPath: /media/downloads/complete/tv/
+          remotePath: "{{ seedbox_download_path }}/"
+          localPath: /media/downloads/complete/
         status_code: [200, 201]
       when: sonarr_remote_paths.json | selectattr('host', 'equalto', seedbox_qbit_host) | list | length == 0
+
+    - name: Sonarr — check custom formats
+      ansible.builtin.uri:
+        url: "{{ sonarr_url }}/api/v3/customformat"
+        headers:
+          X-Api-Key: "{{ secrets.sonarr_api_key }}"
+      register: sonarr_custom_formats
+
+    - name: Sonarr — create Dual Audio custom format
+      ansible.builtin.uri:
+        url: "{{ sonarr_url }}/api/v3/customformat"
+        method: POST
+        headers:
+          X-Api-Key: "{{ secrets.sonarr_api_key }}"
+        body_format: json
+        body: "{{ dual_audio_custom_format }}"
+        status_code: [200, 201]
+      register: sonarr_dual_audio_cf
+      when: sonarr_custom_formats.json | selectattr('name', 'equalto', 'Dual Audio') | list | length == 0
+
+    - name: Sonarr — get Dual Audio format ID
+      ansible.builtin.set_fact:
+        sonarr_dual_audio_id: >-
+          {{ sonarr_dual_audio_cf.json.id | default(
+             (sonarr_custom_formats.json | selectattr('name', 'equalto', 'Dual Audio') | first).id
+          ) }}
+
+    - name: Sonarr — get quality profile HD 720p/1080p
+      ansible.builtin.uri:
+        url: "{{ sonarr_url }}/api/v3/qualityprofile/6"
+        headers:
+          X-Api-Key: "{{ secrets.sonarr_api_key }}"
+      register: sonarr_profile_6
+
+    - name: Sonarr — add Dual Audio score to quality profile
+      ansible.builtin.uri:
+        url: "{{ sonarr_url }}/api/v3/qualityprofile/6"
+        method: PUT
+        headers:
+          X-Api-Key: "{{ secrets.sonarr_api_key }}"
+        body_format: json
+        body: >-
+          {{ sonarr_profile_6.json | combine({
+            'upgradeAllowed': true,
+            'minFormatScore': 0,
+            'cutoffFormatScore': 150,
+            'formatItems': [{'format': sonarr_dual_audio_id | int, 'name': 'Dual Audio', 'score': 150}]
+          }) }}
+        status_code: [200, 202]
+      when: >-
+        not sonarr_profile_6.json.upgradeAllowed or
+        sonarr_profile_6.json.cutoffFormatScore != 150 or
+        sonarr_profile_6.json.formatItems | selectattr('name', 'equalto', 'Dual Audio') | selectattr('score', 'equalto', 150) | list | length == 0
 
     # ================================================================
     # RADARR — root folder, download client, remote path mapping
@@ -212,10 +294,86 @@
         body_format: json
         body:
           host: "{{ seedbox_qbit_host }}"
-          remotePath: "{{ seedbox_download_path }}/movies/"
-          localPath: /media/downloads/complete/movies/
+          remotePath: "{{ seedbox_download_path }}/"
+          localPath: /media/downloads/complete/
         status_code: [200, 201]
       when: radarr_remote_paths.json | selectattr('host', 'equalto', seedbox_qbit_host) | list | length == 0
+
+    - name: Radarr — get quality definitions
+      ansible.builtin.uri:
+        url: "{{ radarr_url }}/api/v3/qualitydefinition"
+        headers:
+          X-Api-Key: "{{ secrets.radarr_api_key }}"
+      register: radarr_quality_defs
+
+    - name: Radarr — cap 1080p/720p quality sizes (~10GB for 2hr movie)
+      ansible.builtin.uri:
+        url: "{{ radarr_url }}/api/v3/qualitydefinition/{{ item.id }}"
+        method: PUT
+        headers:
+          X-Api-Key: "{{ secrets.radarr_api_key }}"
+        body_format: json
+        body: "{{ item | combine({'maxSize': 85.0, 'preferredSize': 70.0}) }}"
+        status_code: [200, 202]
+      loop: "{{ radarr_quality_defs.json }}"
+      loop_control:
+        label: "{{ item.quality.name }}"
+      when: >-
+        ('1080' in item.quality.name or '720' in item.quality.name) and
+        (item.maxSize is not defined or item.maxSize is none or item.maxSize == 0 or item.maxSize > 85)
+
+    - name: Radarr — check custom formats
+      ansible.builtin.uri:
+        url: "{{ radarr_url }}/api/v3/customformat"
+        headers:
+          X-Api-Key: "{{ secrets.radarr_api_key }}"
+      register: radarr_custom_formats
+
+    - name: Radarr — create Dual Audio custom format
+      ansible.builtin.uri:
+        url: "{{ radarr_url }}/api/v3/customformat"
+        method: POST
+        headers:
+          X-Api-Key: "{{ secrets.radarr_api_key }}"
+        body_format: json
+        body: "{{ dual_audio_custom_format }}"
+        status_code: [200, 201]
+      register: radarr_dual_audio_cf
+      when: radarr_custom_formats.json | selectattr('name', 'equalto', 'Dual Audio') | list | length == 0
+
+    - name: Radarr — get Dual Audio format ID
+      ansible.builtin.set_fact:
+        radarr_dual_audio_id: >-
+          {{ radarr_dual_audio_cf.json.id | default(
+             (radarr_custom_formats.json | selectattr('name', 'equalto', 'Dual Audio') | first).id
+          ) }}
+
+    - name: Radarr — get quality profile HD 720p/1080p
+      ansible.builtin.uri:
+        url: "{{ radarr_url }}/api/v3/qualityprofile/6"
+        headers:
+          X-Api-Key: "{{ secrets.radarr_api_key }}"
+      register: radarr_profile_6
+
+    - name: Radarr — add Dual Audio score to quality profile
+      ansible.builtin.uri:
+        url: "{{ radarr_url }}/api/v3/qualityprofile/6"
+        method: PUT
+        headers:
+          X-Api-Key: "{{ secrets.radarr_api_key }}"
+        body_format: json
+        body: >-
+          {{ radarr_profile_6.json | combine({
+            'upgradeAllowed': true,
+            'minFormatScore': 0,
+            'cutoffFormatScore': 150,
+            'formatItems': [{'format': radarr_dual_audio_id | int, 'name': 'Dual Audio', 'score': 150}]
+          }) }}
+        status_code: [200, 202]
+      when: >-
+        not radarr_profile_6.json.upgradeAllowed or
+        radarr_profile_6.json.cutoffFormatScore != 150 or
+        radarr_profile_6.json.formatItems | selectattr('name', 'equalto', 'Dual Audio') | selectattr('score', 'equalto', 150) | list | length == 0
 
     # ================================================================
     # PROWLARR — connect to Sonarr, Radarr, Lidarr
@@ -442,8 +600,8 @@
         body_format: json
         body:
           host: "{{ seedbox_qbit_host }}"
-          remotePath: "{{ seedbox_download_path }}/music/"
-          localPath: /media/downloads/complete/music/
+          remotePath: "{{ seedbox_download_path }}/"
+          localPath: /media/downloads/complete/
         status_code: [200, 201]
       when: lidarr_remote_paths.json | selectattr('host', 'equalto', seedbox_qbit_host) | list | length == 0
 
@@ -727,14 +885,41 @@
           port: 8989
           useSsl: false
           apiKey: "{{ secrets.sonarr_api_key }}"
-          activeProfileId: 1
-          activeProfileName: Any
+          activeProfileId: 6
+          activeProfileName: "HD - 720p/1080p"
           activeDirectory: /media/tv
           is4k: false
           isDefault: true
           enableSeasonFolders: true
         status_code: [200, 201]
       when: jellyseerr_sonarr.json | default([]) | selectattr('name', 'equalto', 'Sonarr') | list | length == 0
+      no_log: true
+
+    - name: Jellyseerr — update Sonarr profile to HD 720p/1080p
+      ansible.builtin.uri:
+        url: "{{ jellyseerr_url }}/api/v1/settings/sonarr/{{ jellyseerr_sonarr_config.id }}"
+        method: PUT
+        headers:
+          X-Api-Key: "{{ jellyseerr_api_key }}"
+        body_format: json
+        body:
+          name: "{{ jellyseerr_sonarr_config.name }}"
+          hostname: "{{ jellyseerr_sonarr_config.hostname }}"
+          port: "{{ jellyseerr_sonarr_config.port }}"
+          useSsl: "{{ jellyseerr_sonarr_config.useSsl }}"
+          apiKey: "{{ jellyseerr_sonarr_config.apiKey }}"
+          activeProfileId: 6
+          activeProfileName: "HD - 720p/1080p"
+          activeDirectory: "{{ jellyseerr_sonarr_config.activeDirectory }}"
+          is4k: "{{ jellyseerr_sonarr_config.is4k }}"
+          isDefault: "{{ jellyseerr_sonarr_config.isDefault }}"
+          enableSeasonFolders: "{{ jellyseerr_sonarr_config.enableSeasonFolders | default(true) }}"
+        status_code: [200]
+      vars:
+        jellyseerr_sonarr_config: "{{ jellyseerr_sonarr.json | selectattr('name', 'equalto', 'Sonarr') | first }}"
+      when: >-
+        jellyseerr_sonarr.json | default([]) | selectattr('name', 'equalto', 'Sonarr') | list | length > 0 and
+        (jellyseerr_sonarr.json | selectattr('name', 'equalto', 'Sonarr') | first).activeProfileId != 6
       no_log: true
 
     - name: Jellyseerr — get existing Radarr config
@@ -757,14 +942,120 @@
           port: 7878
           useSsl: false
           apiKey: "{{ secrets.radarr_api_key }}"
-          activeProfileId: 1
-          activeProfileName: Any
+          activeProfileId: 6
+          activeProfileName: "HD - 720p/1080p"
           activeDirectory: /media/movies
           is4k: false
           isDefault: true
           minimumAvailability: released
         status_code: [200, 201]
       when: jellyseerr_radarr.json | default([]) | selectattr('name', 'equalto', 'Radarr') | list | length == 0
+      no_log: true
+
+    - name: Jellyseerr — update Radarr profile to HD 720p/1080p
+      ansible.builtin.uri:
+        url: "{{ jellyseerr_url }}/api/v1/settings/radarr/{{ jellyseerr_radarr_config.id }}"
+        method: PUT
+        headers:
+          X-Api-Key: "{{ jellyseerr_api_key }}"
+        body_format: json
+        body:
+          name: "{{ jellyseerr_radarr_config.name }}"
+          hostname: "{{ jellyseerr_radarr_config.hostname }}"
+          port: "{{ jellyseerr_radarr_config.port }}"
+          useSsl: "{{ jellyseerr_radarr_config.useSsl }}"
+          apiKey: "{{ jellyseerr_radarr_config.apiKey }}"
+          activeProfileId: 6
+          activeProfileName: "HD - 720p/1080p"
+          activeDirectory: "{{ jellyseerr_radarr_config.activeDirectory }}"
+          is4k: "{{ jellyseerr_radarr_config.is4k }}"
+          isDefault: "{{ jellyseerr_radarr_config.isDefault }}"
+          minimumAvailability: "{{ jellyseerr_radarr_config.minimumAvailability | default('released') }}"
+        status_code: [200]
+      vars:
+        jellyseerr_radarr_config: "{{ jellyseerr_radarr.json | selectattr('name', 'equalto', 'Radarr') | first }}"
+      when: >-
+        jellyseerr_radarr.json | default([]) | selectattr('name', 'equalto', 'Radarr') | list | length > 0 and
+        (jellyseerr_radarr.json | selectattr('name', 'equalto', 'Radarr') | first).activeProfileId != 6
+      no_log: true
+
+    # ================================================================
+    # BAZARR — connect to Sonarr + Radarr, enable subtitles
+    # ================================================================
+
+    - name: Bazarr — read API key from config
+      ansible.builtin.slurp:
+        src: /mnt/data/docker/bazarr/config/config/config.yaml
+      register: bazarr_config_raw
+
+    - name: Bazarr — parse API key
+      ansible.builtin.set_fact:
+        bazarr_api_key: "{{ (bazarr_config_raw.content | b64decode | from_yaml).auth.apikey }}"
+
+    - name: Bazarr — wait for API
+      ansible.builtin.uri:
+        url: "{{ bazarr_url }}/api/system/status"
+        headers:
+          X-API-KEY: "{{ bazarr_api_key }}"
+        status_code: [200]
+      register: bazarr_status
+      retries: 6
+      delay: 10
+      until: bazarr_status is not failed
+
+    - name: Bazarr — get current settings
+      ansible.builtin.uri:
+        url: "{{ bazarr_url }}/api/system/settings"
+        headers:
+          X-API-KEY: "{{ bazarr_api_key }}"
+      register: bazarr_settings
+
+    - name: Bazarr — configure Sonarr connection
+      ansible.builtin.uri:
+        url: "{{ bazarr_url }}/api/system/settings"
+        method: POST
+        headers:
+          X-API-KEY: "{{ bazarr_api_key }}"
+        body_format: json
+        body:
+          settings:
+            general:
+              use_sonarr: true
+            sonarr:
+              ip: sonarr
+              port: 8989
+              base_url: /
+              apikey: "{{ secrets.sonarr_api_key }}"
+              ssl: false
+              only_monitored: false
+              series_sync: 60
+        status_code: [200, 202, 204]
+      when: >-
+        bazarr_settings.json.settings.sonarr.apikey | default('') != secrets.sonarr_api_key
+      no_log: true
+
+    - name: Bazarr — configure Radarr connection
+      ansible.builtin.uri:
+        url: "{{ bazarr_url }}/api/system/settings"
+        method: POST
+        headers:
+          X-API-KEY: "{{ bazarr_api_key }}"
+        body_format: json
+        body:
+          settings:
+            general:
+              use_radarr: true
+            radarr:
+              ip: radarr
+              port: 7878
+              base_url: /
+              apikey: "{{ secrets.radarr_api_key }}"
+              ssl: false
+              only_monitored: false
+              movies_sync: 60
+        status_code: [200, 202, 204]
+      when: >-
+        bazarr_settings.json.settings.radarr.apikey | default('') != secrets.radarr_api_key
       no_log: true
 
     # ================================================================
@@ -850,9 +1141,11 @@
           - "Lidarr: root folder /media/music, download client configured, remote path mapping set"
           - "Jellyfin: setup wizard completed, libraries added, VAAPI transcoding enabled"
           - "Jellyseerr: connected to Jellyfin, Sonarr, Radarr"
+          - "Bazarr: connected to Sonarr + Radarr, English subtitles enabled"
           - "Autobrr: account created, qBittorrent download client added"
           - ""
+          - "Next: run 05d-trackers.yml for Prowlarr indexers + Autobrr IRC"
+          - ""
           - "Manual steps remaining:"
-          - "  - Prowlarr: add indexers (tracker credentials needed)"
-          - "  - Autobrr: add IRC networks + filters (tracker-specific)"
+          - "  - Bazarr: add subtitle providers (OpenSubtitles, Addic7ed, etc.)"
           - "  - Jellyfin: fine-tune transcoding settings if needed"

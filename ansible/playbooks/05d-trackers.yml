@@ -1,0 +1,296 @@
+---
+# 05d-trackers.yml
+# Adds tracker indexers to Prowlarr and TorrentLeech IRC automation to Autobrr.
+# Prerequisites: 05b-arr-config.yml must have been run (Prowlarr apps + Autobrr account).
+#
+# What this playbook does:
+#   - Prowlarr:  TorrentLeech indexer (username/password), FearNoPeer indexer (API key)
+#   - Autobrr:   TorrentLeech indexer + IRC network + freeleech filter (disabled, enable in UI)
+
+- name: Configure trackers and IRC automation
+  hosts: docker_host
+  gather_facts: false
+
+  vars:
+    secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../../docker/secrets.sops.yml') | from_yaml }}"
+    trackers: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/trackers.sops.yml') | from_yaml }}"
+
+    prowlarr_url: "http://127.0.0.1:9696"
+    autobrr_url: "http://127.0.0.1:7474"
+
+  pre_tasks:
+    - name: Wait for SSH connection
+      ansible.builtin.wait_for_connection:
+        timeout: 60
+
+  tasks:
+
+    # ================================================================
+    # PROWLARR — add tracker indexers
+    # ================================================================
+
+    - name: Prowlarr — check existing indexers
+      ansible.builtin.uri:
+        url: "{{ prowlarr_url }}/api/v1/indexer"
+        headers:
+          X-Api-Key: "{{ secrets.prowlarr_api_key }}"
+      register: prowlarr_indexers
+
+    - name: Prowlarr — add TorrentLeech indexer
+      ansible.builtin.uri:
+        url: "{{ prowlarr_url }}/api/v1/indexer"
+        method: POST
+        headers:
+          X-Api-Key: "{{ secrets.prowlarr_api_key }}"
+        body_format: json
+        body:
+          name: TorrentLeech
+          enable: true
+          redirect: false
+          priority: 25
+          appProfileId: 1
+          implementation: Cardigann
+          configContract: CardigannSettings
+          protocol: torrent
+          tags: []
+          fields:
+            - name: definitionFile
+              value: torrentleech
+            - name: baseUrl
+              value: "https://www.torrentleech.org/"
+            - name: username
+              value: "{{ trackers.torrentleech_username }}"
+            - name: password
+              value: "{{ trackers.torrentleech_password }}"
+        status_code: [200, 201]
+      when: prowlarr_indexers.json | selectattr('name', 'equalto', 'TorrentLeech') | list | length == 0
+      no_log: true
+
+    - name: Prowlarr — add FearNoPeer indexer
+      ansible.builtin.uri:
+        url: "{{ prowlarr_url }}/api/v1/indexer"
+        method: POST
+        headers:
+          X-Api-Key: "{{ secrets.prowlarr_api_key }}"
+        body_format: json
+        body:
+          name: FearNoPeer
+          enable: true
+          redirect: false
+          priority: 25
+          appProfileId: 1
+          implementation: Cardigann
+          configContract: CardigannSettings
+          protocol: torrent
+          tags: []
+          fields:
+            - name: definitionFile
+              value: fearnopeer
+            - name: baseUrl
+              value: "https://fearnopeer.com/"
+            - name: apikey
+              value: "{{ trackers.fearnopeer_api_key }}"
+        status_code: [200, 201]
+      when: prowlarr_indexers.json | selectattr('name', 'equalto', 'FearNoPeer') | list | length == 0
+      no_log: true
+
+    # ================================================================
+    # AUTOBRR — TorrentLeech indexer + IRC + filter
+    # ================================================================
+
+    - name: Autobrr — login
+      ansible.builtin.uri:
+        url: "{{ autobrr_url }}/api/auth/login"
+        method: POST
+        body_format: json
+        body:
+          username: "{{ secrets.jellyseerr_admin_user }}"
+          password: "{{ secrets.jellyseerr_admin_password }}"
+        status_code: [200, 204]
+      register: autobrr_login
+      no_log: true
+
+    # --- Indexer ---
+
+    - name: Autobrr — check existing indexers
+      ansible.builtin.uri:
+        url: "{{ autobrr_url }}/api/indexer"
+        headers:
+          Cookie: "{{ autobrr_login.cookies_string }}"
+      register: autobrr_indexers
+
+    - name: Autobrr — add TorrentLeech indexer
+      ansible.builtin.uri:
+        url: "{{ autobrr_url }}/api/indexer"
+        method: POST
+        headers:
+          Cookie: "{{ autobrr_login.cookies_string }}"
+        body_format: json
+        body:
+          name: TorrentLeech
+          identifier: torrentleech
+          identifier_external: torrentleech
+          implementation: irc
+          base_url: "https://www.torrentleech.org/"
+          enabled: true
+          settings:
+            rsskey: "{{ trackers.torrentleech_rss_key }}"
+        status_code: [200, 201]
+      when: autobrr_indexers.json | default([]) | selectattr('identifier', 'equalto', 'torrentleech') | list | length == 0
+      no_log: true
+
+    # --- IRC network ---
+    # Creating the indexer auto-creates the IRC network from the built-in definition.
+    # We need to update it with our nick and invite command.
+
+    - name: Autobrr — get IRC networks
+      ansible.builtin.uri:
+        url: "{{ autobrr_url }}/api/irc"
+        headers:
+          Cookie: "{{ autobrr_login.cookies_string }}"
+      register: autobrr_irc
+
+    - name: Autobrr — find TorrentLeech IRC network
+      ansible.builtin.set_fact:
+        tl_irc_network: "{{ autobrr_irc.json | selectattr('name', 'search', '(?i)torrentleech') | first | default(None) }}"
+
+    - name: Autobrr — update TorrentLeech IRC network (nick + invite + enable channel)
+      ansible.builtin.uri:
+        url: "{{ autobrr_url }}/api/irc/network/{{ tl_irc_network.id }}"
+        method: PUT
+        headers:
+          Cookie: "{{ autobrr_login.cookies_string }}"
+        body_format: json
+        body:
+          id: "{{ tl_irc_network.id | int }}"
+          name: "{{ tl_irc_network.name }}"
+          enabled: true
+          server: "{{ tl_irc_network.server }}"
+          port: "{{ tl_irc_network.port | int }}"
+          tls: "{{ tl_irc_network.tls }}"
+          nick: "{{ trackers.torrentleech_irc_nick }}"
+          auth: "{{ tl_irc_network.auth }}"
+          invite_command: "/msg _AnnounceBot_ !invite {{ trackers.torrentleech_irc_key }}"
+          channels:
+            - id: "{{ (tl_irc_network.channels | first).id | default(0) | int }}"
+              enabled: true
+              name: "#tlannounces"
+        status_code: [200, 204]
+      when: >-
+        tl_irc_network is not none and
+        (tl_irc_network.nick != trackers.torrentleech_irc_nick or
+         trackers.torrentleech_irc_key not in (tl_irc_network.invite_command | default('')) or
+         not (tl_irc_network.channels | first).enabled | default(false))
+      no_log: true
+
+    - name: Autobrr — create TorrentLeech IRC network (fallback if not auto-created)
+      ansible.builtin.uri:
+        url: "{{ autobrr_url }}/api/irc"
+        method: POST
+        headers:
+          Cookie: "{{ autobrr_login.cookies_string }}"
+        body_format: json
+        body:
+          name: TorrentLeech.org
+          enabled: true
+          server: irc.torrentleech.org
+          port: 7021
+          tls: true
+          nick: "{{ trackers.torrentleech_irc_nick }}"
+          auth:
+            mechanism: NONE
+          invite_command: "/msg _AnnounceBot_ !invite {{ trackers.torrentleech_irc_key }}"
+          channels:
+            - enabled: true
+              name: "#tlannounces"
+        status_code: [200, 201, 204]
+      when: tl_irc_network is none
+      no_log: true
+
+    - name: Autobrr — restart IRC network to apply changes
+      ansible.builtin.uri:
+        url: "{{ autobrr_url }}/api/irc/network/{{ tl_irc_network.id | default(1) }}/restart"
+        headers:
+          Cookie: "{{ autobrr_login.cookies_string }}"
+        status_code: [200, 204]
+      when: tl_irc_network is not none
+
+    # --- Filter (disabled by default, enable in UI) ---
+
+    - name: Autobrr — get existing filters
+      ansible.builtin.uri:
+        url: "{{ autobrr_url }}/api/filters"
+        headers:
+          Cookie: "{{ autobrr_login.cookies_string }}"
+      register: autobrr_filters
+
+    - name: Autobrr — refresh indexers list
+      ansible.builtin.uri:
+        url: "{{ autobrr_url }}/api/indexer"
+        headers:
+          Cookie: "{{ autobrr_login.cookies_string }}"
+      register: autobrr_indexers_final
+
+    - name: Autobrr — get download clients
+      ansible.builtin.uri:
+        url: "{{ autobrr_url }}/api/download_clients"
+        headers:
+          Cookie: "{{ autobrr_login.cookies_string }}"
+      register: autobrr_clients
+
+    - name: Autobrr — create TL freeleech filter (disabled — enable in UI)
+      ansible.builtin.uri:
+        url: "{{ autobrr_url }}/api/filters"
+        method: POST
+        headers:
+          Cookie: "{{ autobrr_login.cookies_string }}"
+        body_format: json
+        body:
+          name: "TL Freeleech < 5GB"
+          enabled: false
+          priority: 10
+          max_size: "5 GB"
+          freeleech: true
+          resolutions: []
+          codecs: []
+          sources: []
+          containers: []
+          match_hdr: []
+          except_hdr: []
+          match_other: []
+          except_other: []
+          match_releases: ""
+          except_releases: ""
+          match_release_groups: ""
+          except_release_groups: ""
+          match_release_tags: ""
+          except_release_tags: ""
+          match_categories: ""
+          except_categories: ""
+          tags: ""
+          except_tags: ""
+          origins: []
+          indexers:
+            - id: "{{ (autobrr_indexers_final.json | selectattr('identifier', 'equalto', 'torrentleech') | first).id }}"
+              name: TorrentLeech
+              identifier: torrentleech
+          actions:
+            - name: Send to Seedbox
+              type: QBITTORRENT
+              enabled: true
+              client_id: "{{ (autobrr_clients.json | selectattr('name', 'equalto', 'Seedbox') | first).id }}"
+              category: freeleech
+        status_code: [200, 201]
+      when: autobrr_filters.json | default([]) | selectattr('name', 'search', 'TL Freeleech') | list | length == 0
+
+    # ================================================================
+    # Summary
+    # ================================================================
+
+    - name: Tracker configuration complete
+      ansible.builtin.debug:
+        msg:
+          - "Tracker configuration complete!"
+          - "Prowlarr: TorrentLeech + FearNoPeer indexers added"
+          - "Autobrr: TorrentLeech IRC network configured ({{ trackers.torrentleech_irc_nick }})"
+          - "Autobrr: Filter 'TL Freeleech < 5GB' created (DISABLED — enable in UI)"

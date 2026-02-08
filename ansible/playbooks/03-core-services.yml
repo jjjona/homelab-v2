@@ -8,6 +8,7 @@
 #   - Sonarr, Radarr, Prowlarr, Lidarr (arr suite)
 #   - Jellyseerr (media requests)
 #   - Autobrr (automation, behind VPN)
+#   - Bazarr (subtitle management)
 #   - Linkding (bookmark manager)
 #   - Gluetun (VPN tunnel for Prowlarr + Autobrr)
 #
@@ -103,6 +104,7 @@
         - /mnt/data/docker/lidarr/config
         - /mnt/data/docker/jellyseerr/config
         - /mnt/data/docker/autobrr/config
+        - /mnt/data/docker/bazarr/config
         - /mnt/data/docker/linkding/data
 
     # --- Pre-seed Servarr config.xml with API keys (first deploy only) ---
@@ -340,6 +342,17 @@
       retries: 3
       delay: 5
       until: autobrr_check is not failed
+
+    - name: Verify Bazarr is responding
+      ansible.builtin.uri:
+        url: "http://localhost:80/"
+        headers:
+          Host: "bazarr.{{ secrets.domain }}"
+        status_code: [200, 302]
+      register: bazarr_check
+      retries: 3
+      delay: 5
+      until: bazarr_check is not failed
 
     - name: Verify Linkding is responding
       ansible.builtin.uri:

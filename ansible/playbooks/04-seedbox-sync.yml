@@ -64,6 +64,7 @@
           echo "$(date): Starting sync" >> "$LOGFILE"
 
           rsync -avz --ignore-existing \
+            --exclude='freeleech/' \
             -e "ssh -i $SSH_KEY -p {{ seedbox.seedbox_port }}" \
             {{ seedbox.seedbox_user }}@{{ seedbox.seedbox_host }}:{{ seedbox.seedbox_remote_path }}/ \
             /mnt/nas/media/downloads/complete/ \
