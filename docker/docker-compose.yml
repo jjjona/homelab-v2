@@ -131,6 +131,27 @@ services:
       web:
         ipv4_address: 172.20.0.14
 
+  plex:
+    image: linuxserver/plex:latest
+    container_name: plex
+    ports:
+      - "32400:32400"
+    environment:
+      - PUID=0
+      - PGID=0
+      - TZ=Europe/Brussels
+      - VERSION=docker
+      - PLEX_CLAIM=${PLEX_CLAIM:-}
+    volumes:
+      - /mnt/data/docker/plex/config:/config
+      - /mnt/nas/media:/media:ro
+    devices:
+      - /dev/dri:/dev/dri
+    restart: unless-stopped
+    networks:
+      web:
+        ipv4_address: 172.20.0.17
+
   bazarr:
     image: linuxserver/bazarr:latest
     container_name: bazarr

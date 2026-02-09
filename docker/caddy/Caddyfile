@@ -39,6 +39,10 @@ http://autobrr.{$DOMAIN} {
 	reverse_proxy gluetun:7474
 }
 
+http://plex.{$DOMAIN} {
+	reverse_proxy plex:32400
+}
+
 http://bazarr.{$DOMAIN} {
 	reverse_proxy bazarr:6767
 }

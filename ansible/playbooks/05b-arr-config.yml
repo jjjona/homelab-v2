@@ -204,7 +204,7 @@
         body_format: json
         body: >-
           {{ sonarr_profile_6.json | combine({
-            'upgradeAllowed': true,
+            'upgradeAllowed': false,
             'minFormatScore': 0,
             'cutoffFormatScore': 150,
             'formatItems': [{'format': sonarr_dual_audio_id | int, 'name': 'Dual Audio', 'score': 150}]
@@ -364,7 +364,7 @@
         body_format: json
         body: >-
           {{ radarr_profile_6.json | combine({
-            'upgradeAllowed': true,
+            'upgradeAllowed': false,
             'minFormatScore': 0,
             'cutoffFormatScore': 150,
             'formatItems': [{'format': radarr_dual_audio_id | int, 'name': 'Dual Audio', 'score': 150}]
@@ -886,7 +886,7 @@
           useSsl: false
           apiKey: "{{ secrets.sonarr_api_key }}"
           activeProfileId: 6
-          activeProfileName: "HD - 720p/1080p"
+          activeProfileName: "HD - 1080p"
           activeDirectory: /media/tv
           is4k: false
           isDefault: true
@@ -895,7 +895,7 @@
       when: jellyseerr_sonarr.json | default([]) | selectattr('name', 'equalto', 'Sonarr') | list | length == 0
       no_log: true
 
-    - name: Jellyseerr — update Sonarr profile to HD 720p/1080p
+    - name: Jellyseerr — update Sonarr profile to HD 1080p
       ansible.builtin.uri:
         url: "{{ jellyseerr_url }}/api/v1/settings/sonarr/{{ jellyseerr_sonarr_config.id }}"
         method: PUT
@@ -909,7 +909,7 @@
           useSsl: "{{ jellyseerr_sonarr_config.useSsl }}"
           apiKey: "{{ jellyseerr_sonarr_config.apiKey }}"
           activeProfileId: 6
-          activeProfileName: "HD - 720p/1080p"
+          activeProfileName: "HD - 1080p"
           activeDirectory: "{{ jellyseerr_sonarr_config.activeDirectory }}"
           is4k: "{{ jellyseerr_sonarr_config.is4k }}"
           isDefault: "{{ jellyseerr_sonarr_config.isDefault }}"
@@ -943,7 +943,7 @@
           useSsl: false
           apiKey: "{{ secrets.radarr_api_key }}"
           activeProfileId: 6
-          activeProfileName: "HD - 720p/1080p"
+          activeProfileName: "HD - 1080p"
           activeDirectory: /media/movies
           is4k: false
           isDefault: true
@@ -952,7 +952,7 @@
       when: jellyseerr_radarr.json | default([]) | selectattr('name', 'equalto', 'Radarr') | list | length == 0
       no_log: true
 
-    - name: Jellyseerr — update Radarr profile to HD 720p/1080p
+    - name: Jellyseerr — update Radarr profile to HD 1080p
       ansible.builtin.uri:
         url: "{{ jellyseerr_url }}/api/v1/settings/radarr/{{ jellyseerr_radarr_config.id }}"
         method: PUT
@@ -966,7 +966,7 @@
           useSsl: "{{ jellyseerr_radarr_config.useSsl }}"
           apiKey: "{{ jellyseerr_radarr_config.apiKey }}"
           activeProfileId: 6
-          activeProfileName: "HD - 720p/1080p"
+          activeProfileName: "HD - 1080p"
           activeDirectory: "{{ jellyseerr_radarr_config.activeDirectory }}"
           is4k: "{{ jellyseerr_radarr_config.is4k }}"
           isDefault: "{{ jellyseerr_radarr_config.isDefault }}"
@@ -977,6 +977,52 @@
       when: >-
         jellyseerr_radarr.json | default([]) | selectattr('name', 'equalto', 'Radarr') | list | length > 0 and
         (jellyseerr_radarr.json | selectattr('name', 'equalto', 'Radarr') | first).activeProfileId != 6
+      no_log: true
+
+    - name: Jellyseerr — add Sonarr 4K
+      ansible.builtin.uri:
+        url: "{{ jellyseerr_url }}/api/v1/settings/sonarr"
+        method: POST
+        headers:
+          X-Api-Key: "{{ jellyseerr_api_key }}"
+        body_format: json
+        body:
+          name: Sonarr 4K
+          hostname: sonarr
+          port: 8989
+          useSsl: false
+          apiKey: "{{ secrets.sonarr_api_key }}"
+          activeProfileId: 5
+          activeProfileName: Ultra-HD
+          activeDirectory: /media/tv
+          is4k: true
+          isDefault: true
+          enableSeasonFolders: true
+        status_code: [200, 201]
+      when: jellyseerr_sonarr.json | default([]) | selectattr('is4k', 'equalto', true) | list | length == 0
+      no_log: true
+
+    - name: Jellyseerr — add Radarr 4K
+      ansible.builtin.uri:
+        url: "{{ jellyseerr_url }}/api/v1/settings/radarr"
+        method: POST
+        headers:
+          X-Api-Key: "{{ jellyseerr_api_key }}"
+        body_format: json
+        body:
+          name: Radarr 4K
+          hostname: radarr
+          port: 7878
+          useSsl: false
+          apiKey: "{{ secrets.radarr_api_key }}"
+          activeProfileId: 5
+          activeProfileName: Ultra-HD
+          activeDirectory: /media/movies
+          is4k: true
+          isDefault: true
+          minimumAvailability: released
+        status_code: [200, 201]
+      when: jellyseerr_radarr.json | default([]) | selectattr('is4k', 'equalto', true) | list | length == 0
       no_log: true
 
     # ================================================================

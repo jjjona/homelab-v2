@@ -5,6 +5,7 @@
 #   - cloudflared (Cloudflare Tunnel)
 #   - Arcane (Docker management UI)
 #   - Jellyfin (media streaming, VAAPI transcoding)
+#   - Plex (media streaming, VAAPI transcoding)
 #   - Sonarr, Radarr, Prowlarr, Lidarr (arr suite)
 #   - Jellyseerr (media requests)
 #   - Autobrr (automation, behind VPN)
@@ -102,6 +103,7 @@
         - /mnt/data/docker/radarr/config
         - /mnt/data/docker/prowlarr/config
         - /mnt/data/docker/lidarr/config
+        - /mnt/data/docker/plex/config
         - /mnt/data/docker/jellyseerr/config
         - /mnt/data/docker/autobrr/config
         - /mnt/data/docker/bazarr/config
@@ -276,6 +278,15 @@
       retries: 3
       delay: 5
       until: jellyfin_check is not failed
+
+    - name: Verify Plex is responding
+      ansible.builtin.uri:
+        url: "http://localhost:32400/identity"
+        status_code: [200]
+      register: plex_check
+      retries: 3
+      delay: 5
+      until: plex_check is not failed
 
     - name: Verify Sonarr is responding
       ansible.builtin.uri:

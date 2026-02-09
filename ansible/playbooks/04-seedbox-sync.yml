@@ -63,7 +63,7 @@
 
           echo "$(date): Starting sync" >> "$LOGFILE"
 
-          rsync -avz --ignore-existing \
+          rsync -avz --ignore-existing --chown=100000:100000 \
             --exclude='freeleech/' \
             -e "ssh -i $SSH_KEY -p {{ seedbox.seedbox_port }}" \
             {{ seedbox.seedbox_user }}@{{ seedbox.seedbox_host }}:{{ seedbox.seedbox_remote_path }}/ \

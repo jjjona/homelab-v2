@@ -5,7 +5,7 @@
 #
 # What this playbook does:
 #   - Prowlarr:  TorrentLeech indexer (username/password), FearNoPeer indexer (API key)
-#   - Autobrr:   TorrentLeech indexer + IRC network + freeleech filter (disabled, enable in UI)
+#   - Autobrr:   TorrentLeech indexer + IRC network + freeleech filter + Seedbox action
 
 - name: Configure trackers and IRC automation
   hosts: docker_host
@@ -238,7 +238,7 @@
           Cookie: "{{ autobrr_login.cookies_string }}"
       register: autobrr_clients
 
-    - name: Autobrr — create TL freeleech filter (disabled — enable in UI)
+    - name: Autobrr — create TL freeleech filter
       ansible.builtin.uri:
         url: "{{ autobrr_url }}/api/filters"
         method: POST
@@ -247,7 +247,7 @@
         body_format: json
         body:
           name: "TL Freeleech < 5GB"
-          enabled: false
+          enabled: true
           priority: 10
           max_size: "5 GB"
           freeleech: true
@@ -274,14 +274,53 @@
             - id: "{{ (autobrr_indexers_final.json | selectattr('identifier', 'equalto', 'torrentleech') | first).id }}"
               name: TorrentLeech
               identifier: torrentleech
+        status_code: [200, 201]
+      register: autobrr_filter_create
+      when: autobrr_filters.json | default([]) | selectattr('name', 'search', 'TL Freeleech') | list | length == 0
+
+    # Autobrr API silently drops actions during filter POST — must add via PUT separately
+    - name: Autobrr — find TL freeleech filter
+      ansible.builtin.set_fact:
+        tl_filter: >-
+          {{
+            autobrr_filter_create.json | default(None)
+            if autobrr_filter_create is not skipped
+            else (autobrr_filters.json | selectattr('name', 'search', 'TL Freeleech') | first | default(None))
+          }}
+
+    - name: Autobrr — get filter details (check for actions)
+      ansible.builtin.uri:
+        url: "{{ autobrr_url }}/api/filters/{{ tl_filter.id }}"
+        headers:
+          Cookie: "{{ autobrr_login.cookies_string }}"
+      register: autobrr_filter_detail
+      when: tl_filter is not none
+
+    - name: Autobrr — add action to TL freeleech filter
+      ansible.builtin.uri:
+        url: "{{ autobrr_url }}/api/filters/{{ tl_filter.id }}"
+        method: PUT
+        headers:
+          Cookie: "{{ autobrr_login.cookies_string }}"
+        body_format: json
+        body:
+          id: "{{ tl_filter.id | int }}"
+          name: "{{ autobrr_filter_detail.json.name }}"
+          enabled: "{{ autobrr_filter_detail.json.enabled }}"
+          priority: "{{ autobrr_filter_detail.json.priority | int }}"
+          max_size: "{{ autobrr_filter_detail.json.max_size }}"
+          freeleech: "{{ autobrr_filter_detail.json.freeleech }}"
+          indexers: "{{ autobrr_filter_detail.json.indexers }}"
           actions:
             - name: Send to Seedbox
               type: QBITTORRENT
               enabled: true
               client_id: "{{ (autobrr_clients.json | selectattr('name', 'equalto', 'Seedbox') | first).id }}"
               category: freeleech
-        status_code: [200, 201]
-      when: autobrr_filters.json | default([]) | selectattr('name', 'search', 'TL Freeleech') | list | length == 0
+        status_code: [200, 204]
+      when: >-
+        tl_filter is not none and
+        (autobrr_filter_detail.json.actions | default([]) | length == 0)
 
     # ================================================================
     # Summary
@@ -293,4 +332,4 @@
           - "Tracker configuration complete!"
           - "Prowlarr: TorrentLeech + FearNoPeer indexers added"
           - "Autobrr: TorrentLeech IRC network configured ({{ trackers.torrentleech_irc_nick }})"
-          - "Autobrr: Filter 'TL Freeleech < 5GB' created (DISABLED — enable in UI)"
+          - "Autobrr: Filter 'TL Freeleech < 5GB' with Seedbox action"
