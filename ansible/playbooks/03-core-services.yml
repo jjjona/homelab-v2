@@ -108,6 +108,8 @@
         - /mnt/data/docker/autobrr/config
         - /mnt/data/docker/bazarr/config
         - /mnt/data/docker/linkding/data
+        - /mnt/data/docker/pocketid/data
+        - /mnt/data/docker/tinyauth/data
 
     # --- Pre-seed Servarr config.xml with API keys (first deploy only) ---
 
@@ -187,6 +189,13 @@
           ARCANE_JWT_SECRET={{ secrets.arcane_jwt_secret }}
           LINKDING_SUPERUSER_NAME={{ secrets.linkding_superuser_name }}
           LINKDING_SUPERUSER_PASSWORD={{ secrets.linkding_superuser_password }}
+          POCKETID_ENCRYPTION_KEY={{ secrets.pocketid_encryption_key }}
+          TINYAUTH_SECRET={{ secrets.tinyauth_secret }}
+          TINYAUTH_OIDC_CLIENT_ID={{ secrets.tinyauth_oidc_client_id }}
+          TINYAUTH_OIDC_CLIENT_SECRET={{ secrets.tinyauth_oidc_client_secret }}
+          LINKDING_ENABLE_OIDC=True
+          LINKDING_OIDC_CLIENT_ID={{ secrets.linkding_oidc_client_id }}
+          LINKDING_OIDC_CLIENT_SECRET={{ secrets.linkding_oidc_client_secret }}
         owner: root
         group: root
         mode: "0600"
@@ -296,7 +305,7 @@
         url: "http://localhost:80/"
         headers:
           Host: "jellyfin.{{ secrets.domain }}"
-        status_code: [200, 302]
+        status_code: [200, 302, 401]
       register: jellyfin_check
       retries: 3
       delay: 5
@@ -316,7 +325,7 @@
         url: "http://localhost:80/"
         headers:
           Host: "sonarr.{{ secrets.domain }}"
-        status_code: [200, 302]
+        status_code: [200, 302, 401]
       register: sonarr_check
       retries: 3
       delay: 5
@@ -327,7 +336,7 @@
         url: "http://localhost:80/"
         headers:
           Host: "radarr.{{ secrets.domain }}"
-        status_code: [200, 302]
+        status_code: [200, 302, 401]
       register: radarr_check
       retries: 3
       delay: 5
@@ -338,7 +347,7 @@
         url: "http://localhost:80/"
         headers:
           Host: "prowlarr.{{ secrets.domain }}"
-        status_code: [200, 302]
+        status_code: [200, 302, 401]
       register: prowlarr_check
       retries: 3
       delay: 5
@@ -349,7 +358,7 @@
         url: "http://localhost:80/"
         headers:
           Host: "lidarr.{{ secrets.domain }}"
-        status_code: [200, 302]
+        status_code: [200, 302, 401]
       register: lidarr_check
       retries: 3
       delay: 5
@@ -360,7 +369,7 @@
         url: "http://localhost:80/"
         headers:
           Host: "jellyseerr.{{ secrets.domain }}"
-        status_code: [200, 302]
+        status_code: [200, 302, 401]
       register: jellyseerr_check
       retries: 3
       delay: 5
@@ -371,7 +380,7 @@
         url: "http://localhost:80/"
         headers:
           Host: "autobrr.{{ secrets.domain }}"
-        status_code: [200, 302]
+        status_code: [200, 302, 401]
       register: autobrr_check
       retries: 3
       delay: 5
@@ -382,7 +391,7 @@
         url: "http://localhost:80/"
         headers:
           Host: "bazarr.{{ secrets.domain }}"
-        status_code: [200, 302]
+        status_code: [200, 302, 401]
       register: bazarr_check
       retries: 3
       delay: 5
@@ -393,7 +402,7 @@
         url: "http://localhost:80/"
         headers:
           Host: "links.{{ secrets.domain }}"
-        status_code: [200, 302]
+        status_code: [200, 302, 401]
       register: linkding_check
       retries: 3
       delay: 5

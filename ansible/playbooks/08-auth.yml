@@ -1,0 +1,160 @@
+---
+# 08-auth.yml
+# Configures authentication for all services after PocketID + Tinyauth are deployed.
+#
+# Prerequisites:
+#   - 03-core-services.yml must have been run (PocketID + Tinyauth containers up)
+#   - PocketID initial setup completed (admin account + passkey registered)
+#   - OIDC clients created in PocketID for Tinyauth, Forgejo, Linkding
+#   - OIDC client secrets saved to docker/secrets.sops.yml and ansible/secrets/auth.sops.yml
+#
+# What this playbook does:
+#   - Arr suite (Sonarr, Radarr, Prowlarr, Lidarr): set AuthenticationMethod=External
+#   - Bazarr: enable proxy header auth (Remote-User)
+#   - Forgejo: add PocketID as OAuth2 auth source via CLI
+#
+# What stays manual:
+#   - PocketID initial setup (passkey registration requires browser)
+#   - OIDC client creation in PocketID admin UI
+
+- name: Configure authentication
+  hosts: docker_host
+  gather_facts: false
+
+  vars:
+    secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../../docker/secrets.sops.yml') | from_yaml }}"
+    auth_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/auth.sops.yml') | from_yaml }}"
+
+    servarr_apps:
+      - sonarr
+      - radarr
+      - prowlarr
+      - lidarr
+
+    bazarr_url: "http://127.0.0.1:6767"
+
+  pre_tasks:
+    - name: Wait for SSH connection
+      ansible.builtin.wait_for_connection:
+        timeout: 60
+
+  tasks:
+
+    # ================================================================
+    # ARR SUITE — switch to External authentication
+    # ================================================================
+
+    - name: "Arr suite — set External auth in config.xml"
+      ansible.builtin.replace:
+        path: "/mnt/data/docker/{{ item }}/config/config.xml"
+        regexp: '<AuthenticationMethod>[^<]*</AuthenticationMethod>'
+        replace: '<AuthenticationMethod>External</AuthenticationMethod>'
+      loop: "{{ servarr_apps }}"
+      register: arr_auth_method
+
+    - name: "Arr suite — set AuthenticationRequired=Enabled"
+      ansible.builtin.replace:
+        path: "/mnt/data/docker/{{ item }}/config/config.xml"
+        regexp: '<AuthenticationRequired>[^<]*</AuthenticationRequired>'
+        replace: '<AuthenticationRequired>Enabled</AuthenticationRequired>'
+      loop: "{{ servarr_apps }}"
+      register: arr_auth_required
+
+    - name: "Arr suite — restart containers to apply auth changes"
+      ansible.builtin.command:
+        cmd: "docker restart {{ item }}"
+      loop: "{{ servarr_apps }}"
+      when: arr_auth_method.results[idx].changed or arr_auth_required.results[idx].changed
+      loop_control:
+        index_var: idx
+      changed_when: true
+
+    - name: "Arr suite — wait for containers to start"
+      ansible.builtin.pause:
+        seconds: 15
+      when: arr_auth_method is changed or arr_auth_required is changed
+
+    # ================================================================
+    # BAZARR — enable proxy header authentication
+    # ================================================================
+
+    - name: Bazarr — read API key from config
+      ansible.builtin.slurp:
+        src: /mnt/data/docker/bazarr/config/config/config.yaml
+      register: bazarr_config_raw
+
+    - name: Bazarr — parse API key
+      ansible.builtin.set_fact:
+        bazarr_api_key: "{{ (bazarr_config_raw.content | b64decode | from_yaml).auth.apikey }}"
+
+    - name: Bazarr — get current settings
+      ansible.builtin.uri:
+        url: "{{ bazarr_url }}/api/system/settings"
+        headers:
+          X-API-KEY: "{{ bazarr_api_key }}"
+      register: bazarr_settings
+
+    - name: Bazarr — enable header auth (Remote-User)
+      ansible.builtin.uri:
+        url: "{{ bazarr_url }}/api/system/settings"
+        method: POST
+        headers:
+          X-API-KEY: "{{ bazarr_api_key }}"
+        body_format: json
+        body:
+          settings:
+            auth:
+              type: header
+              header: Remote-User
+        status_code: [200, 202, 204]
+      when: >-
+        bazarr_settings.json.settings.auth.type | default('') != 'header'
+
+    # ================================================================
+    # FORGEJO — add PocketID as OAuth2 auth source
+    # ================================================================
+
+    - name: Forgejo — check existing auth sources
+      ansible.builtin.command:
+        cmd: docker exec --user 1000 forgejo forgejo admin auth list
+      register: forgejo_auth_list
+      changed_when: false
+
+    - name: Forgejo — add PocketID OAuth2 auth source
+      ansible.builtin.command:
+        cmd: >-
+          docker exec --user 1000 forgejo forgejo admin auth add-oauth
+          --name "PocketID"
+          --provider openidConnect
+          --key "{{ auth_secrets.forgejo_oidc_client_id }}"
+          --secret "{{ auth_secrets.forgejo_oidc_client_secret }}"
+          --auto-discover-url "https://auth.{{ secrets.domain }}/.well-known/openid-configuration"
+          --scopes "openid email profile groups"
+      when: "'PocketID' not in forgejo_auth_list.stdout"
+      no_log: true
+      changed_when: true
+
+    # ================================================================
+    # Summary
+    # ================================================================
+
+    - name: Configuration complete
+      ansible.builtin.debug:
+        msg:
+          - "Authentication configuration complete!"
+          - ""
+          - "Arr suite (Sonarr, Radarr, Prowlarr, Lidarr):"
+          - "  AuthenticationMethod=External, AuthenticationRequired=Enabled"
+          - "  → No login screen, trusts Tinyauth Remote-User header"
+          - ""
+          - "Bazarr:"
+          - "  auth.type=header, auth.header=Remote-User"
+          - "  → Proxy header authentication via Tinyauth"
+          - ""
+          - "Forgejo:"
+          - "  PocketID OAuth2 auth source added (openidConnect)"
+          - "  → 'Sign in with PocketID' button on login page"
+          - ""
+          - "Linkding:"
+          - "  OIDC enabled via docker-compose env vars (deployed by 03-core-services.yml)"
+          - "  → OIDC login option on login page"

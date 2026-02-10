@@ -5,6 +5,9 @@ api:
 entryPoints:
   web:
     address: ":80"
+    forwardedHeaders:
+      trustedIPs:
+        - "172.20.0.0/24"
 
 providers:
   docker:

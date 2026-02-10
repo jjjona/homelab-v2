@@ -226,7 +226,7 @@
         var: ct_status.stdout
 
 # =============================================================
-# Play 3: Claude LXC — Install Node.js + Claude Code + git
+# Play 3: Claude LXC — Install Claude Code + git
 # =============================================================
 - name: Install Claude Code on Claude LXC
   hosts: claude
@@ -291,49 +291,19 @@
         mode: "0600"
         remote_src: true
 
-    # --- Node.js 22 LTS via NodeSource ---
-
-    - name: Create keyrings directory
-      ansible.builtin.file:
-        path: /etc/apt/keyrings
-        state: directory
-        mode: "0755"
-
-    - name: Download NodeSource setup script
-      ansible.builtin.get_url:
-        url: https://deb.nodesource.com/setup_22.x
-        dest: /tmp/nodesource_setup.sh
-        mode: "0755"
-
-    - name: Run NodeSource setup script
-      ansible.builtin.command: /tmp/nodesource_setup.sh
-      args:
-        creates: /etc/apt/sources.list.d/nodesource.list
-
-    - name: Install Node.js
-      ansible.builtin.apt:
-        name: nodejs
-        state: present
-        update_cache: true
-
-    - name: Verify Node.js version
-      ansible.builtin.command: node --version
-      register: node_version
-      changed_when: false
-
-    - name: Show Node.js version
-      ansible.builtin.debug:
-        var: node_version.stdout
-
-    # --- Claude Code CLI ---
+    # --- Claude Code CLI (native installer) ---
 
     - name: Install Claude Code CLI
-      ansible.builtin.command: npm install -g @anthropic-ai/claude-code
+      ansible.builtin.shell: curl -fsSL https://claude.ai/install.sh | bash
+      become: true
+      become_user: claude
       args:
-        creates: /usr/lib/node_modules/@anthropic-ai/claude-code
+        creates: /home/claude/.local/bin/claude
 
     - name: Verify Claude Code version
-      ansible.builtin.command: claude --version
+      ansible.builtin.command: /home/claude/.local/bin/claude --version
+      become: true
+      become_user: claude
       register: claude_version
       changed_when: false
 

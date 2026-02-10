@@ -25,6 +25,56 @@ services:
       web:
         ipv4_address: 172.20.0.22
 
+  pocketid:
+    image: ghcr.io/pocket-id/pocket-id:v2.2.0
+    container_name: pocketid
+    environment:
+      - APP_URL=https://auth.${DOMAIN}
+      - TRUST_PROXY=true
+      - ENCRYPTION_KEY=${POCKETID_ENCRYPTION_KEY}
+      - MAXMIND_LICENSE_KEY=
+    volumes:
+      - /mnt/data/docker/pocketid/data:/app/data
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.pocketid.rule=Host(`auth.${DOMAIN}`)"
+      - "traefik.http.services.pocketid.loadbalancer.server.port=1411"
+    networks:
+      web:
+        ipv4_address: 172.20.0.5
+
+  tinyauth:
+    image: ghcr.io/steveiliop56/tinyauth:v4
+    container_name: tinyauth
+    environment:
+      - APP_URL=https://login.${DOMAIN}
+      - SECRET=${TINYAUTH_SECRET}
+      - COOKIE_DOMAIN=.${DOMAIN}
+      - PROVIDERS_POCKETID_CLIENT_ID=${TINYAUTH_OIDC_CLIENT_ID}
+      - PROVIDERS_POCKETID_CLIENT_SECRET=${TINYAUTH_OIDC_CLIENT_SECRET}
+      - PROVIDERS_POCKETID_AUTH_URL=https://auth.${DOMAIN}/authorize
+      - PROVIDERS_POCKETID_TOKEN_URL=https://auth.${DOMAIN}/api/oidc/token
+      - PROVIDERS_POCKETID_USER_INFO_URL=https://auth.${DOMAIN}/api/oidc/userinfo
+      - PROVIDERS_POCKETID_REDIRECT_URL=https://login.${DOMAIN}/api/oauth/callback/pocketid
+      - PROVIDERS_POCKETID_SCOPES=openid email profile groups
+      - PROVIDERS_POCKETID_NAME=Pocket ID
+      - OAUTH_AUTO_REDIRECT=pocketid
+    volumes:
+      - /mnt/data/docker/tinyauth/data:/app/data
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.tinyauth.rule=Host(`login.${DOMAIN}`)"
+      - "traefik.http.routers.tinyauth.service=tinyauth"
+      - "traefik.http.services.tinyauth.loadbalancer.server.port=3000"
+      - "traefik.http.middlewares.tinyauth.forwardauth.address=http://tinyauth:3000/api/auth/traefik"
+      - "traefik.http.middlewares.tinyauth.forwardauth.trustForwardHeader=true"
+      - "traefik.http.middlewares.tinyauth.forwardauth.authResponseHeaders=Remote-User,Remote-Email,Remote-Name,Remote-Groups"
+    networks:
+      web:
+        ipv4_address: 172.20.0.6
+
   cloudflared:
     image: cloudflare/cloudflared:latest
     container_name: cloudflared
@@ -54,6 +104,7 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.arcane.rule=Host(`arcane.${DOMAIN}`)"
+      - "traefik.http.routers.arcane.middlewares=tinyauth@docker"
       - "traefik.http.services.arcane.loadbalancer.server.port=3552"
     networks:
       web:
@@ -78,6 +129,7 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.jellyfin.rule=Host(`jellyfin.${DOMAIN}`)"
+      - "traefik.http.routers.jellyfin.middlewares=tinyauth@docker"
       - "traefik.http.services.jellyfin.loadbalancer.server.port=8096"
     networks:
       web:
@@ -99,6 +151,7 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.sonarr.rule=Host(`sonarr.${DOMAIN}`)"
+      - "traefik.http.routers.sonarr.middlewares=tinyauth@docker"
       - "traefik.http.services.sonarr.loadbalancer.server.port=8989"
     networks:
       web:
@@ -120,6 +173,7 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.radarr.rule=Host(`radarr.${DOMAIN}`)"
+      - "traefik.http.routers.radarr.middlewares=tinyauth@docker"
       - "traefik.http.services.radarr.loadbalancer.server.port=7878"
     networks:
       web:
@@ -141,6 +195,7 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.lidarr.rule=Host(`lidarr.${DOMAIN}`)"
+      - "traefik.http.routers.lidarr.middlewares=tinyauth@docker"
       - "traefik.http.services.lidarr.loadbalancer.server.port=8686"
     networks:
       web:
@@ -159,6 +214,7 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.jellyseerr.rule=Host(`jellyseerr.${DOMAIN}`)"
+      - "traefik.http.routers.jellyseerr.middlewares=tinyauth@docker"
       - "traefik.http.services.jellyseerr.loadbalancer.server.port=5055"
     networks:
       web:
@@ -184,6 +240,7 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.plex.rule=Host(`plex.${DOMAIN}`)"
+      - "traefik.http.routers.plex.middlewares=tinyauth@docker"
       - "traefik.http.services.plex.loadbalancer.server.port=32400"
     networks:
       web:
@@ -205,6 +262,7 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.bazarr.rule=Host(`bazarr.${DOMAIN}`)"
+      - "traefik.http.routers.bazarr.middlewares=tinyauth@docker"
       - "traefik.http.services.bazarr.loadbalancer.server.port=6767"
     networks:
       web:
@@ -217,12 +275,17 @@ services:
       - LD_SUPERUSER_NAME=${LINKDING_SUPERUSER_NAME}
       - LD_SUPERUSER_PASSWORD=${LINKDING_SUPERUSER_PASSWORD}
       - LD_CSRF_TRUSTED_ORIGINS=https://links.${DOMAIN}
+      - LD_ENABLE_OIDC=${LINKDING_ENABLE_OIDC:-}
+      - LD_OIDC_CLIENT_ID=${LINKDING_OIDC_CLIENT_ID:-}
+      - LD_OIDC_CLIENT_SECRET=${LINKDING_OIDC_CLIENT_SECRET:-}
+      - LD_OIDC_PROVIDER_URL=https://auth.${DOMAIN}/.well-known/openid-configuration
     volumes:
       - /mnt/data/docker/linkding/data:/etc/linkding/data
     restart: unless-stopped
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.linkding.rule=Host(`links.${DOMAIN}`)"
+      - "traefik.http.routers.linkding.middlewares=tinyauth@docker"
       - "traefik.http.services.linkding.loadbalancer.server.port=9090"
     networks:
       web:
@@ -241,7 +304,9 @@ services:
       - FORGEJO__server__SSH_DOMAIN=192.168.0.159
       - FORGEJO__server__SSH_PORT=2222
       - FORGEJO__security__INSTALL_LOCK=true
-      - FORGEJO__service__DISABLE_REGISTRATION=true
+      - FORGEJO__service__DISABLE_REGISTRATION=false
+      - FORGEJO__service__ALLOW_ONLY_EXTERNAL_REGISTRATION=true
+      - FORGEJO__service__SHOW_REGISTRATION_BUTTON=false
       - FORGEJO__database__DB_TYPE=sqlite3
     volumes:
       - /mnt/data/docker/forgejo/data:/data
@@ -250,6 +315,7 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.forgejo.rule=Host(`git.${DOMAIN}`)"
+      - "traefik.http.routers.forgejo.middlewares=tinyauth@docker"
       - "traefik.http.services.forgejo.loadbalancer.server.port=3000"
     networks:
       web:
@@ -285,9 +351,11 @@ services:
       - "traefik.enable=true"
       - "traefik.http.routers.prowlarr.rule=Host(`prowlarr.${DOMAIN}`)"
       - "traefik.http.routers.prowlarr.service=prowlarr"
+      - "traefik.http.routers.prowlarr.middlewares=tinyauth@docker"
       - "traefik.http.services.prowlarr.loadbalancer.server.port=9696"
       - "traefik.http.routers.autobrr.rule=Host(`autobrr.${DOMAIN}`)"
       - "traefik.http.routers.autobrr.service=autobrr"
+      - "traefik.http.routers.autobrr.middlewares=tinyauth@docker"
       - "traefik.http.services.autobrr.loadbalancer.server.port=7474"
     networks:
       web:
