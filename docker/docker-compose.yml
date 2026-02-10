@@ -5,11 +5,15 @@ services:
     container_name: traefik
     ports:
       - "80:80"
-      - "127.0.0.1:8080:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
       - ./traefik/dynamic:/etc/traefik/dynamic:ro
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.dashboard.rule=Host(`traefik.${DOMAIN}`)"
+      - "traefik.http.routers.dashboard.service=api@internal"
+      - "traefik.http.routers.dashboard.middlewares=tinyauth@docker"
     restart: unless-stopped
     networks:
       web:
