@@ -1,0 +1,16 @@
+http:
+  routers:
+    proxmox:
+      rule: "Host(`bog.{{ domain }}`)"
+      entryPoints:
+        - web
+      service: proxmox-svc
+  services:
+    proxmox-svc:
+      loadBalancer:
+        serversTransport: insecure-transport
+        servers:
+          - url: "https://192.168.0.158:8006"
+  serversTransports:
+    insecure-transport:
+      insecureSkipVerify: true

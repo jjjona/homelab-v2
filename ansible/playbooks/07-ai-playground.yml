@@ -1,0 +1,932 @@
+---
+# 07-ai-playground.yml
+# Creates an AI Agent Playground with two LXCs and a Forgejo git server:
+#   - Claude LXC 201 (.160): Node.js + Claude Code CLI + git (runs as `claude` user)
+#   - Pandora LXC 202 (.161): Docker Engine + git + traefik-kop (Claude's sandbox)
+#   - Forgejo on existing docker-host compose stack (git.jnrm.eu)
+#
+# Claude can SSH into Pandora and push/pull repos from Forgejo.
+# traefik-kop on Pandora syncs Docker labels to Traefik via Redis,
+# so Claude Code can expose containers by adding standard Traefik labels.
+# Claude Code auth is manual (interactive login after deploy).
+#
+# Safe to re-run: LXC creation skips if already running,
+# Forgejo user creation skips if users exist.
+
+# =============================================================
+# Play 1: Proxmox — Create Claude LXC 201
+# =============================================================
+- name: Create Claude LXC
+  hosts: proxmox
+  gather_facts: false
+
+  vars:
+    ct_id: 201
+    ct_hostname: claude
+    ct_ip: 192.168.0.160
+    ct_gw: 192.168.0.1
+    ct_memory: 4096
+    ct_swap: 1024
+    ct_cores: 2
+    ct_rootfs_size: 20
+    ct_template: debian-12-standard_12.12-1_amd64.tar.zst
+    ct_template_storage: local
+    ssh_pubkey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFG9NoQSuVYiBD5fib0bN43e2UWwH5iEeDy99cCsHrHC"
+
+  tasks:
+
+    - name: Check if LXC {{ ct_id }} exists
+      ansible.builtin.command: pct status {{ ct_id }}
+      register: ct_check
+      ignore_errors: true
+      changed_when: false
+
+    - name: Skip if LXC {{ ct_id }} is already running
+      ansible.builtin.debug:
+        msg: "LXC {{ ct_id }} already exists ({{ ct_check.stdout | default('') }}), skipping creation"
+      when: ct_check.rc == 0
+
+    - name: Create LXC {{ ct_id }}
+      when: ct_check.rc != 0
+      block:
+
+        - name: Update container template index
+          ansible.builtin.command: pveam update
+          changed_when: false
+
+        - name: Download Debian CT template
+          ansible.builtin.command: >
+            pveam download {{ ct_template_storage }} {{ ct_template }}
+          register: template_download
+          changed_when: "'already exists' not in template_download.stdout"
+          failed_when:
+            - template_download.rc != 0
+            - "'already exists' not in template_download.stderr"
+
+        - name: Write SSH public key to temp file
+          ansible.builtin.copy:
+            dest: /tmp/ct-ssh-pubkey.pub
+            content: "{{ ssh_pubkey }}\n"
+            mode: "0600"
+
+        - name: Create LXC {{ ct_id }}
+          ansible.builtin.command: >
+            pct create {{ ct_id }}
+            {{ ct_template_storage }}:vztmpl/{{ ct_template }}
+            --hostname {{ ct_hostname }}
+            --unprivileged 1
+            --features nesting=1,keyctl=1
+            --rootfs local-lvm:{{ ct_rootfs_size }}
+            --memory {{ ct_memory }}
+            --swap {{ ct_swap }}
+            --cores {{ ct_cores }}
+            --net0 name=eth0,bridge=vmbr0,ip={{ ct_ip }}/24,gw={{ ct_gw }},firewall=0
+            --nameserver 1.1.1.1
+            --onboot 1
+            --start 0
+            --ssh-public-keys /tmp/ct-ssh-pubkey.pub
+
+        - name: Start LXC {{ ct_id }}
+          ansible.builtin.command: pct start {{ ct_id }}
+
+        - name: Wait for LXC systemd to be ready
+          ansible.builtin.command: pct exec {{ ct_id }} -- systemctl is-system-running --wait
+          register: systemd_ready
+          retries: 12
+          delay: 5
+          until: systemd_ready.rc == 0 or (systemd_ready.stdout is defined and 'running' in systemd_ready.stdout)
+          changed_when: false
+
+        - name: Remove temp SSH key file
+          ansible.builtin.file:
+            path: /tmp/ct-ssh-pubkey.pub
+            state: absent
+
+    - name: Ensure LXC {{ ct_id }} is started
+      ansible.builtin.command: pct start {{ ct_id }}
+      register: start_result
+      failed_when:
+        - start_result.rc != 0
+        - "'already running' not in start_result.stderr"
+      changed_when: start_result.rc == 0
+
+    - name: Verify LXC {{ ct_id }} status
+      ansible.builtin.command: pct status {{ ct_id }}
+      register: ct_status
+      changed_when: false
+
+    - name: Show LXC {{ ct_id }} status
+      ansible.builtin.debug:
+        var: ct_status.stdout
+
+# =============================================================
+# Play 2: Proxmox — Create Pandora LXC 202
+# =============================================================
+- name: Create Pandora LXC
+  hosts: proxmox
+  gather_facts: false
+
+  vars:
+    ct_id: 202
+    ct_hostname: pandora
+    ct_ip: 192.168.0.161
+    ct_gw: 192.168.0.1
+    ct_memory: 4096
+    ct_swap: 2048
+    ct_cores: 4
+    ct_rootfs_size: 50
+    ct_template: debian-12-standard_12.12-1_amd64.tar.zst
+    ct_template_storage: local
+    ssh_pubkey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFG9NoQSuVYiBD5fib0bN43e2UWwH5iEeDy99cCsHrHC"
+
+  tasks:
+
+    - name: Check if LXC {{ ct_id }} exists
+      ansible.builtin.command: pct status {{ ct_id }}
+      register: ct_check
+      ignore_errors: true
+      changed_when: false
+
+    - name: Skip if LXC {{ ct_id }} is already running
+      ansible.builtin.debug:
+        msg: "LXC {{ ct_id }} already exists ({{ ct_check.stdout | default('') }}), skipping creation"
+      when: ct_check.rc == 0
+
+    - name: Create LXC {{ ct_id }}
+      when: ct_check.rc != 0
+      block:
+
+        - name: Update container template index
+          ansible.builtin.command: pveam update
+          changed_when: false
+
+        - name: Download Debian CT template
+          ansible.builtin.command: >
+            pveam download {{ ct_template_storage }} {{ ct_template }}
+          register: template_download
+          changed_when: "'already exists' not in template_download.stdout"
+          failed_when:
+            - template_download.rc != 0
+            - "'already exists' not in template_download.stderr"
+
+        - name: Write SSH public key to temp file
+          ansible.builtin.copy:
+            dest: /tmp/ct-ssh-pubkey.pub
+            content: "{{ ssh_pubkey }}\n"
+            mode: "0600"
+
+        - name: Create LXC {{ ct_id }}
+          ansible.builtin.command: >
+            pct create {{ ct_id }}
+            {{ ct_template_storage }}:vztmpl/{{ ct_template }}
+            --hostname {{ ct_hostname }}
+            --unprivileged 1
+            --features nesting=1,keyctl=1
+            --rootfs local-lvm:{{ ct_rootfs_size }}
+            --memory {{ ct_memory }}
+            --swap {{ ct_swap }}
+            --cores {{ ct_cores }}
+            --net0 name=eth0,bridge=vmbr0,ip={{ ct_ip }}/24,gw={{ ct_gw }},firewall=0
+            --nameserver 1.1.1.1
+            --onboot 1
+            --start 0
+            --ssh-public-keys /tmp/ct-ssh-pubkey.pub
+
+        - name: Start LXC {{ ct_id }}
+          ansible.builtin.command: pct start {{ ct_id }}
+
+        - name: Wait for LXC systemd to be ready
+          ansible.builtin.command: pct exec {{ ct_id }} -- systemctl is-system-running --wait
+          register: systemd_ready
+          retries: 12
+          delay: 5
+          until: systemd_ready.rc == 0 or (systemd_ready.stdout is defined and 'running' in systemd_ready.stdout)
+          changed_when: false
+
+        - name: Remove temp SSH key file
+          ansible.builtin.file:
+            path: /tmp/ct-ssh-pubkey.pub
+            state: absent
+
+    - name: Ensure LXC {{ ct_id }} is started
+      ansible.builtin.command: pct start {{ ct_id }}
+      register: start_result
+      failed_when:
+        - start_result.rc != 0
+        - "'already running' not in start_result.stderr"
+      changed_when: start_result.rc == 0
+
+    - name: Verify LXC {{ ct_id }} status
+      ansible.builtin.command: pct status {{ ct_id }}
+      register: ct_status
+      changed_when: false
+
+    - name: Show LXC {{ ct_id }} status
+      ansible.builtin.debug:
+        var: ct_status.stdout
+
+# =============================================================
+# Play 3: Claude LXC — Install Node.js + Claude Code + git
+# =============================================================
+- name: Install Claude Code on Claude LXC
+  hosts: claude
+  gather_facts: false
+
+  tasks:
+
+    - name: Wait for SSH connection
+      ansible.builtin.wait_for_connection:
+        timeout: 60
+
+    - name: Gather facts
+      ansible.builtin.setup:
+
+    # --- Base packages ---
+
+    - name: Install base packages
+      ansible.builtin.apt:
+        name:
+          - git
+          - curl
+          - jq
+          - ca-certificates
+          - gnupg
+          - python3
+          - sudo
+        state: present
+        update_cache: true
+
+    # --- Create claude user (Claude Code can't run as root) ---
+
+    - name: Create claude user
+      ansible.builtin.user:
+        name: claude
+        shell: /bin/bash
+        groups: sudo
+        append: true
+        create_home: true
+
+    - name: Allow claude passwordless sudo
+      ansible.builtin.copy:
+        dest: /etc/sudoers.d/claude
+        content: "claude ALL=(ALL) NOPASSWD:ALL\n"
+        owner: root
+        group: root
+        mode: "0440"
+
+    - name: Create claude .ssh directory
+      ansible.builtin.file:
+        path: /home/claude/.ssh
+        state: directory
+        owner: claude
+        group: claude
+        mode: "0700"
+
+    - name: Copy SSH authorized_keys to claude user
+      ansible.builtin.copy:
+        src: /root/.ssh/authorized_keys
+        dest: /home/claude/.ssh/authorized_keys
+        owner: claude
+        group: claude
+        mode: "0600"
+        remote_src: true
+
+    # --- Node.js 22 LTS via NodeSource ---
+
+    - name: Create keyrings directory
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Download NodeSource setup script
+      ansible.builtin.get_url:
+        url: https://deb.nodesource.com/setup_22.x
+        dest: /tmp/nodesource_setup.sh
+        mode: "0755"
+
+    - name: Run NodeSource setup script
+      ansible.builtin.command: /tmp/nodesource_setup.sh
+      args:
+        creates: /etc/apt/sources.list.d/nodesource.list
+
+    - name: Install Node.js
+      ansible.builtin.apt:
+        name: nodejs
+        state: present
+        update_cache: true
+
+    - name: Verify Node.js version
+      ansible.builtin.command: node --version
+      register: node_version
+      changed_when: false
+
+    - name: Show Node.js version
+      ansible.builtin.debug:
+        var: node_version.stdout
+
+    # --- Claude Code CLI ---
+
+    - name: Install Claude Code CLI
+      ansible.builtin.command: npm install -g @anthropic-ai/claude-code
+      args:
+        creates: /usr/lib/node_modules/@anthropic-ai/claude-code
+
+    - name: Verify Claude Code version
+      ansible.builtin.command: claude --version
+      register: claude_version
+      changed_when: false
+
+    - name: Show Claude Code version
+      ansible.builtin.debug:
+        var: claude_version.stdout
+
+    # --- SSH key for Pandora access (claude user) ---
+
+    - name: Generate SSH key for Pandora access
+      ansible.builtin.command: >
+        ssh-keygen -t ed25519 -f /home/claude/.ssh/claude_pandora_ed25519 -N "" -C "claude@claude-lxc"
+      args:
+        creates: /home/claude/.ssh/claude_pandora_ed25519
+      become: true
+      become_user: claude
+
+    - name: Fix SSH key ownership
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: claude
+        group: claude
+      loop:
+        - /home/claude/.ssh/claude_pandora_ed25519
+        - /home/claude/.ssh/claude_pandora_ed25519.pub
+
+    - name: Write SSH config for Pandora
+      ansible.builtin.copy:
+        dest: /home/claude/.ssh/config
+        content: |
+          Host pandora
+              HostName 192.168.0.161
+              User root
+              IdentityFile /home/claude/.ssh/claude_pandora_ed25519
+              StrictHostKeyChecking no
+              UserKnownHostsFile /dev/null
+        owner: claude
+        group: claude
+        mode: "0600"
+
+    - name: Read Claude's public key
+      ansible.builtin.slurp:
+        src: /home/claude/.ssh/claude_pandora_ed25519.pub
+      register: claude_pubkey
+
+    - name: Store Claude's public key as fact on localhost
+      ansible.builtin.set_fact:
+        claude_ssh_pubkey: "{{ claude_pubkey.content | b64decode | trim }}"
+      delegate_to: localhost
+      delegate_facts: true
+
+# =============================================================
+# Play 4: Pandora LXC — Install Docker + git + traefik-kop
+# =============================================================
+- name: Install Docker on Pandora LXC
+  hosts: pandora
+  gather_facts: false
+
+  tasks:
+
+    - name: Wait for SSH connection
+      ansible.builtin.wait_for_connection:
+        timeout: 60
+
+    - name: Gather facts
+      ansible.builtin.setup:
+
+    # --- Base packages ---
+
+    - name: Install base packages
+      ansible.builtin.apt:
+        name:
+          - git
+          - curl
+          - jq
+          - ca-certificates
+          - gnupg
+          - python3
+        state: present
+        update_cache: true
+
+    # --- Authorize Claude's SSH key ---
+
+    - name: Add Claude's SSH key to authorized_keys
+      ansible.posix.authorized_key:
+        user: root
+        key: "{{ hostvars['localhost']['claude_ssh_pubkey'] }}"
+        state: present
+
+    # --- Docker official repo ---
+
+    - name: Create keyrings directory
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Download Docker GPG key
+      ansible.builtin.get_url:
+        url: https://download.docker.com/linux/debian/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        mode: "0644"
+
+    - name: Add Docker apt repository
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/docker.list
+        content: >
+          deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc]
+          https://download.docker.com/linux/debian
+          {{ ansible_facts['distribution_release'] }} stable
+        mode: "0644"
+
+    # --- Install Docker ---
+
+    - name: Install Docker Engine
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: true
+
+    # --- Configure Docker daemon ---
+
+    - name: Configure Docker daemon
+      ansible.builtin.copy:
+        dest: /etc/docker/daemon.json
+        content: |
+          {
+            "storage-driver": "overlay2",
+            "log-driver": "json-file",
+            "log-opts": {
+              "max-size": "10m",
+              "max-file": "3"
+            }
+          }
+        owner: root
+        group: root
+        mode: "0644"
+      notify: restart docker
+
+    # --- Enable services ---
+
+    - name: Enable Docker and containerd
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+      loop:
+        - docker
+        - containerd
+
+    # --- Deploy traefik-kop ---
+
+    - name: Create traefik-kop directory
+      ansible.builtin.file:
+        path: /opt/traefik-kop
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Write traefik-kop docker-compose.yml
+      ansible.builtin.copy:
+        dest: /opt/traefik-kop/docker-compose.yml
+        content: |
+          services:
+            traefik-kop:
+              image: ghcr.io/jittering/traefik-kop:latest
+              container_name: traefik-kop
+              restart: unless-stopped
+              volumes:
+                - /var/run/docker.sock:/var/run/docker.sock:ro
+              environment:
+                - REDIS_ADDR=192.168.0.159:6379
+                - BIND_IP=192.168.0.161
+                - POLL_INTERVAL=5
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Pull traefik-kop image
+      ansible.builtin.command:
+        cmd: docker compose pull
+        chdir: /opt/traefik-kop
+      changed_when: true
+
+    - name: Start traefik-kop
+      ansible.builtin.command:
+        cmd: docker compose up -d
+        chdir: /opt/traefik-kop
+      changed_when: true
+
+    # --- Verify ---
+
+    - name: Check Docker version
+      ansible.builtin.command: docker version
+      register: docker_version
+      changed_when: false
+
+    - name: Show Docker version
+      ansible.builtin.debug:
+        var: docker_version.stdout_lines
+
+    - name: Check Compose version
+      ansible.builtin.command: docker compose version
+      register: compose_version
+      changed_when: false
+
+    - name: Show Compose version
+      ansible.builtin.debug:
+        var: compose_version.stdout
+
+    - name: Run hello-world test
+      ansible.builtin.command: docker run --rm hello-world
+      register: hello_world
+      changed_when: false
+
+    - name: Show hello-world output
+      ansible.builtin.debug:
+        var: hello_world.stdout_lines
+
+    - name: Check traefik-kop status
+      ansible.builtin.command:
+        cmd: docker compose ps
+        chdir: /opt/traefik-kop
+      register: kop_status
+      changed_when: false
+
+    - name: Show traefik-kop status
+      ansible.builtin.debug:
+        var: kop_status.stdout_lines
+
+  handlers:
+    - name: restart docker
+      ansible.builtin.systemd:
+        name: docker
+        state: restarted
+
+# =============================================================
+# Play 5: Docker host — Deploy Forgejo + create users
+# =============================================================
+- name: Deploy Forgejo and create users
+  hosts: docker_host
+  gather_facts: false
+
+  vars:
+    project_dir: /mnt/data/docker/core
+    secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../../docker/secrets.sops.yml') | from_yaml }}"
+    ai_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/ai-playground.sops.yml') | from_yaml }}"
+
+  pre_tasks:
+    - name: Wait for SSH connection
+      ansible.builtin.wait_for_connection:
+        timeout: 60
+
+  tasks:
+
+    # --- Create Forgejo data directory ---
+    # Forgejo runs as uid 1000 (git user) inside container.
+    # In unprivileged LXC, uid 1000 maps to host uid 101000.
+    # But from inside the LXC, we just chown to 1000:1000.
+
+    - name: Create Forgejo data directory
+      ansible.builtin.file:
+        path: /mnt/data/docker/forgejo/data
+        state: directory
+        owner: "1000"
+        group: "1000"
+        mode: "0755"
+
+    # --- Copy updated compose + Traefik files ---
+
+    - name: Copy docker-compose.yml
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../docker/docker-compose.yml"
+        dest: "{{ project_dir }}/docker-compose.yml"
+        owner: root
+        group: root
+        mode: "0644"
+
+    # --- Deploy ---
+
+    - name: Pull latest images
+      ansible.builtin.command:
+        cmd: docker compose pull
+        chdir: "{{ project_dir }}"
+      changed_when: true
+
+    - name: Start compose stack
+      ansible.builtin.command:
+        cmd: docker compose up -d --remove-orphans
+        chdir: "{{ project_dir }}"
+      changed_when: true
+
+    # --- Wait for Forgejo ---
+
+    - name: Wait for Forgejo to be ready
+      ansible.builtin.uri:
+        url: http://127.0.0.1:3000
+        status_code: [200, 302]
+      register: forgejo_ready
+      retries: 12
+      delay: 10
+      until: forgejo_ready is not failed
+
+    - name: Show Forgejo status
+      ansible.builtin.debug:
+        msg: "Forgejo is up (HTTP {{ forgejo_ready.status }})"
+
+    # --- Create admin user ---
+
+    - name: Check if admin user exists
+      ansible.builtin.command:
+        cmd: docker exec --user git forgejo forgejo admin user list
+      register: forgejo_users
+      changed_when: false
+
+    - name: Create Forgejo admin user
+      ansible.builtin.command:
+        cmd: >
+          docker exec --user git forgejo forgejo admin user create
+          --username {{ ai_secrets.forgejo_admin_user }}
+          --password {{ ai_secrets.forgejo_admin_password }}
+          --email {{ ai_secrets.forgejo_admin_email }}
+          --admin
+          --must-change-password=false
+      when: ai_secrets.forgejo_admin_user not in forgejo_users.stdout
+      no_log: true
+
+    # --- Create claude user ---
+
+    - name: Create Forgejo claude user
+      ansible.builtin.command:
+        cmd: >
+          docker exec --user git forgejo forgejo admin user create
+          --username {{ ai_secrets.forgejo_claude_user }}
+          --password {{ ai_secrets.forgejo_claude_password }}
+          --email {{ ai_secrets.forgejo_claude_email }}
+          --must-change-password=false
+      when: ai_secrets.forgejo_claude_user not in forgejo_users.stdout
+      no_log: true
+
+    # --- Generate access token for Claude ---
+
+    - name: Check existing tokens via API
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:3000/api/v1/users/{{ ai_secrets.forgejo_claude_user }}/tokens"
+        method: GET
+        user: "{{ ai_secrets.forgejo_claude_user }}"
+        password: "{{ ai_secrets.forgejo_claude_password }}"
+        force_basic_auth: true
+        status_code: [200]
+      register: existing_tokens
+      no_log: true
+
+    - name: Delete old claude-code token if present
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:3000/api/v1/users/{{ ai_secrets.forgejo_claude_user }}/tokens/{{ item.id }}"
+        method: DELETE
+        user: "{{ ai_secrets.forgejo_claude_user }}"
+        password: "{{ ai_secrets.forgejo_claude_password }}"
+        force_basic_auth: true
+        status_code: [204]
+      loop: "{{ existing_tokens.json | selectattr('name', 'equalto', 'claude-code') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+      no_log: true
+
+    - name: Generate fresh access token for Claude
+      ansible.builtin.command:
+        cmd: >
+          docker exec --user git forgejo forgejo admin user generate-access-token
+          --username {{ ai_secrets.forgejo_claude_user }}
+          --token-name claude-code
+          --scopes all
+          --raw
+      register: claude_token_result
+      no_log: true
+
+    - name: Store Claude token as fact
+      ansible.builtin.set_fact:
+        claude_forgejo_token: "{{ claude_token_result.stdout | trim }}"
+      delegate_to: localhost
+      delegate_facts: true
+      no_log: true
+
+    # --- Verify Forgejo via Traefik ---
+
+    - name: Verify Forgejo via Traefik
+      ansible.builtin.uri:
+        url: "http://localhost:80/"
+        headers:
+          Host: "git.{{ secrets.domain }}"
+        status_code: [200, 302]
+      register: forgejo_traefik_check
+      retries: 3
+      delay: 5
+      until: forgejo_traefik_check is not failed
+
+    - name: Show Forgejo via Traefik result
+      ansible.builtin.debug:
+        msg: "Forgejo via Traefik: HTTP {{ forgejo_traefik_check.status }}"
+
+# =============================================================
+# Play 6: Claude + Pandora — Configure git credentials
+# =============================================================
+- name: Configure git on Claude LXC
+  hosts: claude
+  gather_facts: false
+
+  vars:
+    ai_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/ai-playground.sops.yml') | from_yaml }}"
+
+  tasks:
+
+    - name: Configure git user name
+      ansible.builtin.command: git config --global user.name claude
+      become: true
+      become_user: claude
+      changed_when: false
+
+    - name: Configure git user email
+      ansible.builtin.command: git config --global user.email claude@jnrm.eu
+      become: true
+      become_user: claude
+      changed_when: false
+
+    - name: Configure git credential helper
+      ansible.builtin.command: git config --global credential.helper store
+      become: true
+      become_user: claude
+      changed_when: false
+
+    - name: Write git credentials file
+      ansible.builtin.copy:
+        dest: /home/claude/.git-credentials
+        content: "http://{{ ai_secrets.forgejo_claude_user }}:{{ hostvars['localhost']['claude_forgejo_token'] }}@192.168.0.159:3000\n"
+        owner: claude
+        group: claude
+        mode: "0600"
+      no_log: true
+
+    # --- Verify SSH to Pandora ---
+
+    - name: Verify SSH from Claude to Pandora
+      ansible.builtin.command: ssh pandora whoami
+      become: true
+      become_user: claude
+      register: ssh_test
+      changed_when: false
+
+    - name: Show SSH test result
+      ansible.builtin.debug:
+        msg: "SSH Claude → Pandora: {{ ssh_test.stdout }}"
+
+- name: Configure git on Pandora LXC
+  hosts: pandora
+  gather_facts: false
+
+  vars:
+    ai_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/ai-playground.sops.yml') | from_yaml }}"
+
+  tasks:
+
+    - name: Configure git user name
+      ansible.builtin.command: git config --global user.name claude
+      changed_when: false
+
+    - name: Configure git user email
+      ansible.builtin.command: git config --global user.email claude@jnrm.eu
+      changed_when: false
+
+    - name: Configure git credential helper
+      ansible.builtin.command: git config --global credential.helper store
+      changed_when: false
+
+    - name: Write git credentials file
+      ansible.builtin.copy:
+        dest: /root/.git-credentials
+        content: "http://{{ ai_secrets.forgejo_claude_user }}:{{ hostvars['localhost']['claude_forgejo_token'] }}@192.168.0.159:3000\n"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+
+# =============================================================
+# Final verification
+# =============================================================
+- name: Verify AI Playground
+  hosts: proxmox
+  gather_facts: false
+
+  tasks:
+
+    - name: Show running LXCs
+      ansible.builtin.command: pct list
+      register: pct_list
+      changed_when: false
+
+    - name: Show LXC list
+      ansible.builtin.debug:
+        var: pct_list.stdout_lines
+
+    - name: Verify Claude LXC 201 is running
+      ansible.builtin.assert:
+        that: "'201' in pct_list.stdout"
+        fail_msg: "LXC 201 (claude) is not in pct list"
+
+    - name: Verify Pandora LXC 202 is running
+      ansible.builtin.assert:
+        that: "'202' in pct_list.stdout"
+        fail_msg: "LXC 202 (pandora) is not in pct list"
+
+- name: Final checks on Claude
+  hosts: claude
+  gather_facts: false
+
+  tasks:
+
+    - name: Verify Claude Code installed
+      ansible.builtin.command: claude --version
+      register: claude_ver
+      changed_when: false
+
+    - name: Show Claude Code version
+      ansible.builtin.debug:
+        msg: "Claude Code: {{ claude_ver.stdout }}"
+
+    - name: Verify claude user exists
+      ansible.builtin.command: id claude
+      register: claude_user_check
+      changed_when: false
+
+    - name: Show claude user info
+      ansible.builtin.debug:
+        msg: "Claude user: {{ claude_user_check.stdout }}"
+
+    - name: Verify git credentials work
+      ansible.builtin.command: git ls-remote http://192.168.0.159:3000/{{ item }}/
+      loop:
+        - claude
+      register: git_test
+      changed_when: false
+      ignore_errors: true
+      become: true
+      become_user: claude
+
+- name: Final checks on Pandora
+  hosts: pandora
+  gather_facts: false
+
+  tasks:
+
+    - name: Verify Docker on Pandora
+      ansible.builtin.command: docker version --format "Docker {{ '{{' }}.Server.Version{{ '}}' }}"
+      register: docker_ver
+      changed_when: false
+
+    - name: Show Docker version
+      ansible.builtin.debug:
+        msg: "Pandora Docker: {{ docker_ver.stdout }}"
+
+    - name: Verify traefik-kop is running
+      ansible.builtin.command:
+        cmd: docker compose ps --format json
+        chdir: /opt/traefik-kop
+      register: kop_check
+      changed_when: false
+
+    - name: Show traefik-kop status
+      ansible.builtin.debug:
+        var: kop_check.stdout_lines
+
+- name: Summary
+  hosts: localhost
+  gather_facts: false
+  connection: local
+
+  tasks:
+    - name: Show deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "=== AI Playground Deployed ==="
+          - "Claude LXC 201: 192.168.0.160 (Node.js + Claude Code as 'claude' user)"
+          - "Pandora LXC 202: 192.168.0.161 (Docker + traefik-kop)"
+          - "Forgejo: http://192.168.0.159:3000 (git.jnrm.eu)"
+          - ""
+          - "Next steps:"
+          - "  1. SSH to Claude LXC: ssh claude@192.168.0.160"
+          - "  2. Run 'claude' for interactive login"
+          - "  3. Deploy containers on Pandora with Traefik labels"
+          - "     (auto-routed via traefik-kop → Redis → Traefik)"

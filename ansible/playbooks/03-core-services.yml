@@ -1,7 +1,8 @@
 ---
 # 03-core-services.yml
 # Deploys the full Docker Compose stack to the Docker host LXC:
-#   - Caddy (reverse proxy)
+#   - Traefik (reverse proxy, auto-discovery via Docker labels)
+#   - Redis (Traefik KV provider for traefik-kop remote discovery)
 #   - cloudflared (Cloudflare Tunnel)
 #   - Arcane (Docker management UI)
 #   - Jellyfin (media streaming, VAAPI transcoding)
@@ -91,11 +92,10 @@
         mode: "0755"
       loop:
         - "{{ project_dir }}"
-        - "{{ project_dir }}/caddy"
+        - "{{ project_dir }}/traefik"
+        - "{{ project_dir }}/traefik/dynamic"
         - "{{ project_dir }}/cloudflared"
         - "{{ project_dir }}/gluetun"
-        - /mnt/data/docker/caddy/data
-        - /mnt/data/docker/caddy/config
         - /mnt/data/docker/arcane/data
         - /mnt/data/docker/jellyfin/config
         - /mnt/data/docker/jellyfin/cache
@@ -158,13 +158,23 @@
         group: root
         mode: "0644"
 
-    - name: Copy Caddyfile
+    - name: Copy Traefik static config
       ansible.builtin.copy:
-        src: "{{ playbook_dir }}/../../docker/caddy/Caddyfile"
-        dest: "{{ project_dir }}/caddy/Caddyfile"
+        src: "{{ playbook_dir }}/../../docker/traefik/traefik.yml"
+        dest: "{{ project_dir }}/traefik/traefik.yml"
         owner: root
         group: root
         mode: "0644"
+
+    - name: Template Proxmox dynamic route
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../../docker/traefik/dynamic/proxmox.yml.j2"
+        dest: "{{ project_dir }}/traefik/dynamic/proxmox.yml"
+        owner: root
+        group: root
+        mode: "0644"
+      vars:
+        domain: "{{ secrets.domain }}"
 
     # --- Write secrets (decrypted) ---
 
@@ -197,7 +207,7 @@
           credentials-file: /etc/cloudflared/credentials.json
 
           ingress:
-            - service: http://caddy:80
+            - service: http://traefik:80
         owner: "65532"
         group: "65532"
         mode: "0644"
@@ -244,6 +254,19 @@
     - name: Show Gluetun health status
       ansible.builtin.debug:
         msg: "Gluetun VPN: {{ gluetun_health.stdout }}"
+
+    - name: Verify Traefik dashboard is responding
+      ansible.builtin.uri:
+        url: "http://localhost:8080/api/overview"
+        status_code: [200]
+      register: traefik_check
+      retries: 3
+      delay: 5
+      until: traefik_check is not failed
+
+    - name: Show Traefik dashboard status
+      ansible.builtin.debug:
+        msg: "Traefik dashboard: HTTP {{ traefik_check.status }}"
 
     - name: Check compose status
       ansible.builtin.command:
@@ -398,7 +421,7 @@
         var: dri_check.stdout_lines
 
     # --- Arcane user setup ---
-    # Arcane port is only exposed within Docker network, so we go through Caddy on port 80
+    # Arcane port is only exposed within Docker network, so we go through Traefik on port 80
 
     - name: Login to Arcane with default credentials
       ansible.builtin.uri:

@@ -1,20 +1,29 @@
 services:
 
-  caddy:
-    image: caddy:2-alpine
-    container_name: caddy
+  traefik:
+    image: traefik:v3.6
+    container_name: traefik
     ports:
       - "80:80"
-      - "443:443"
+      - "127.0.0.1:8080:8080"
     volumes:
-      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - /mnt/data/docker/caddy/data:/data
-      - /mnt/data/docker/caddy/config:/config
-    env_file: .env
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./traefik/dynamic:/etc/traefik/dynamic:ro
     restart: unless-stopped
     networks:
       web:
         ipv4_address: 172.20.0.2
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    restart: unless-stopped
+    ports:
+      - "0.0.0.0:6379:6379"
+    networks:
+      web:
+        ipv4_address: 172.20.0.22
 
   cloudflared:
     image: cloudflare/cloudflared:latest
@@ -28,7 +37,7 @@ services:
       web:
         ipv4_address: 172.20.0.3
     depends_on:
-      - caddy
+      - traefik
 
   arcane:
     image: ghcr.io/getarcaneapp/arcane:latest
@@ -42,6 +51,10 @@ services:
       - ENCRYPTION_KEY=${ARCANE_ENCRYPTION_KEY}
       - JWT_SECRET=${ARCANE_JWT_SECRET}
     restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.arcane.rule=Host(`arcane.${DOMAIN}`)"
+      - "traefik.http.services.arcane.loadbalancer.server.port=3552"
     networks:
       web:
         ipv4_address: 172.20.0.4
@@ -62,6 +75,10 @@ services:
     devices:
       - /dev/dri:/dev/dri
     restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.jellyfin.rule=Host(`jellyfin.${DOMAIN}`)"
+      - "traefik.http.services.jellyfin.loadbalancer.server.port=8096"
     networks:
       web:
         ipv4_address: 172.20.0.10
@@ -79,6 +96,10 @@ services:
       - /mnt/data/docker/sonarr/config:/config
       - /mnt/nas/media:/media
     restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.sonarr.rule=Host(`sonarr.${DOMAIN}`)"
+      - "traefik.http.services.sonarr.loadbalancer.server.port=8989"
     networks:
       web:
         ipv4_address: 172.20.0.11
@@ -96,6 +117,10 @@ services:
       - /mnt/data/docker/radarr/config:/config
       - /mnt/nas/media:/media
     restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.radarr.rule=Host(`radarr.${DOMAIN}`)"
+      - "traefik.http.services.radarr.loadbalancer.server.port=7878"
     networks:
       web:
         ipv4_address: 172.20.0.12
@@ -113,6 +138,10 @@ services:
       - /mnt/data/docker/lidarr/config:/config
       - /mnt/nas/media:/media
     restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.lidarr.rule=Host(`lidarr.${DOMAIN}`)"
+      - "traefik.http.services.lidarr.loadbalancer.server.port=8686"
     networks:
       web:
         ipv4_address: 172.20.0.13
@@ -127,6 +156,10 @@ services:
     volumes:
       - /mnt/data/docker/jellyseerr/config:/app/config
     restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.jellyseerr.rule=Host(`jellyseerr.${DOMAIN}`)"
+      - "traefik.http.services.jellyseerr.loadbalancer.server.port=5055"
     networks:
       web:
         ipv4_address: 172.20.0.14
@@ -148,6 +181,10 @@ services:
     devices:
       - /dev/dri:/dev/dri
     restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.plex.rule=Host(`plex.${DOMAIN}`)"
+      - "traefik.http.services.plex.loadbalancer.server.port=32400"
     networks:
       web:
         ipv4_address: 172.20.0.17
@@ -165,6 +202,10 @@ services:
       - /mnt/data/docker/bazarr/config:/config
       - /mnt/nas/media:/media
     restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.bazarr.rule=Host(`bazarr.${DOMAIN}`)"
+      - "traefik.http.services.bazarr.loadbalancer.server.port=6767"
     networks:
       web:
         ipv4_address: 172.20.0.16
@@ -179,9 +220,40 @@ services:
     volumes:
       - /mnt/data/docker/linkding/data:/etc/linkding/data
     restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.linkding.rule=Host(`links.${DOMAIN}`)"
+      - "traefik.http.services.linkding.loadbalancer.server.port=9090"
     networks:
       web:
         ipv4_address: 172.20.0.15
+
+  forgejo:
+    image: codeberg.org/forgejo/forgejo:9
+    container_name: forgejo
+    ports:
+      - "0.0.0.0:3000:3000"
+      - "0.0.0.0:2222:22"
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      - FORGEJO__server__ROOT_URL=https://git.${DOMAIN}
+      - FORGEJO__server__SSH_DOMAIN=192.168.0.159
+      - FORGEJO__server__SSH_PORT=2222
+      - FORGEJO__security__INSTALL_LOCK=true
+      - FORGEJO__service__DISABLE_REGISTRATION=true
+      - FORGEJO__database__DB_TYPE=sqlite3
+    volumes:
+      - /mnt/data/docker/forgejo/data:/data
+    env_file: .env
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.forgejo.rule=Host(`git.${DOMAIN}`)"
+      - "traefik.http.services.forgejo.loadbalancer.server.port=3000"
+    networks:
+      web:
+        ipv4_address: 172.20.0.21
 
   # --- VPN (Gluetun) ---
 
@@ -200,7 +272,7 @@ services:
       - VPN_TYPE=openvpn
       - OPENVPN_CUSTOM_CONFIG=/gluetun/custom.conf
       - TZ=Europe/Brussels
-      - FIREWALL_OUTBOUND_SUBNETS=172.20.0.0/24
+      - FIREWALL_OUTBOUND_SUBNETS=172.20.0.0/24,46.232.210.30/32
     volumes:
       - ./gluetun:/gluetun:ro
     extra_hosts:
@@ -209,6 +281,14 @@ services:
       - "lidarr:172.20.0.13"
       - "jellyfin:172.20.0.10"
     restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.prowlarr.rule=Host(`prowlarr.${DOMAIN}`)"
+      - "traefik.http.routers.prowlarr.service=prowlarr"
+      - "traefik.http.services.prowlarr.loadbalancer.server.port=9696"
+      - "traefik.http.routers.autobrr.rule=Host(`autobrr.${DOMAIN}`)"
+      - "traefik.http.routers.autobrr.service=autobrr"
+      - "traefik.http.services.autobrr.loadbalancer.server.port=7474"
     networks:
       web:
         ipv4_address: 172.20.0.20

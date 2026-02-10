@@ -1163,11 +1163,10 @@
           type: QBITTORRENT
           enabled: true
           host: "http://{{ seedbox_qbit_host }}:{{ seedbox_qbit_port }}"
+          username: "{{ seedbox_qbit_user }}"
+          password: "{{ seedbox_qbit_password }}"
           settings:
-            basic:
-              auth: true
-              username: "{{ seedbox_qbit_user }}"
-              password: "{{ seedbox_qbit_password }}"
+            basic: {}
             rules: {}
         status_code: [200, 201]
       when: autobrr_clients.json | default([]) | selectattr('name', 'equalto', 'Seedbox') | list | length == 0
