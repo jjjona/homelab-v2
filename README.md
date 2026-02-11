@@ -34,10 +34,6 @@ Gluetun VPN for Prowlarr + Autobrr. traefik-kop on a second LXC syncs remote Doc
 ## Structure
 
 ```
-install/          # Proxmox automated installer config
 ansible/          # Host + LXC configuration playbooks
 docker/           # Docker Compose stack, Traefik config, app configs
-backups/          # Backup scripts
-scripts/          # Utility scripts (GPU switch, rebuild)
-docs/             # Documentation
 ```
