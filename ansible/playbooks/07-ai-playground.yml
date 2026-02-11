@@ -25,9 +25,9 @@
     ct_hostname: claude
     ct_ip: 192.168.0.160
     ct_gw: 192.168.0.1
-    ct_memory: 4096
-    ct_swap: 1024
-    ct_cores: 2
+    ct_memory: 8192
+    ct_swap: 2048
+    ct_cores: 4
     ct_rootfs_size: 20
     ct_template: debian-12-standard_12.12-1_amd64.tar.zst
     ct_template_storage: local
