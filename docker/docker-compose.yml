@@ -293,13 +293,13 @@ services:
     container_name: forgejo
     ports:
       - "0.0.0.0:3001:3000"
-      - "0.0.0.0:2222:22"
+      - "0.0.0.0:2223:22"
     environment:
       - USER_UID=1000
       - USER_GID=1000
       - FORGEJO__server__ROOT_URL=https://gitarchive.${DOMAIN}
       - FORGEJO__server__SSH_DOMAIN=192.168.0.159
-      - FORGEJO__server__SSH_PORT=2222
+      - FORGEJO__server__SSH_PORT=2223
       - FORGEJO__security__INSTALL_LOCK=true
       - FORGEJO__service__DISABLE_REGISTRATION=false
       - FORGEJO__service__ALLOW_ONLY_EXTERNAL_REGISTRATION=true
@@ -327,13 +327,13 @@ services:
     container_name: gitea
     ports:
       - "0.0.0.0:3000:3000"
-      - "0.0.0.0:2223:22"
+      - "0.0.0.0:2222:22"
     environment:
       - USER_UID=1000
       - USER_GID=1000
       - GITEA__server__ROOT_URL=https://git.${DOMAIN}
       - GITEA__server__SSH_DOMAIN=192.168.0.159
-      - GITEA__server__SSH_PORT=2223
+      - GITEA__server__SSH_PORT=2222
       - GITEA__security__INSTALL_LOCK=true
     volumes:
       - /mnt/data/docker/gitea/data:/data

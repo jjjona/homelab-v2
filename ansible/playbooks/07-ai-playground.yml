@@ -4,7 +4,7 @@
 #   - Jade LXC 201 (.160): Bun + Claude Code + OpenCode CLI + git (runs as `jade` user)
 #   - Pandora LXC 202 (.161): Docker Engine + git + traefik-kop (sandbox node)
 #   - Gitea on existing docker-host compose stack (git.jnrm.eu, port 3000)
-#   - SSH-based git access to Gitea (port 2223) for jade user
+#   - SSH-based git access to Gitea (port 2222) for jade user
 #   - MCP servers (jade-knowledge + jade-journal) for both Claude Code and OpenCode
 #   - Persona slash commands via jade-prompts repo
 #
@@ -537,7 +537,7 @@
 
           Host gitea
               HostName 192.168.0.159
-              Port 2223
+              Port 2222
               User git
               IdentityFile ~/.ssh/jade_gitea_ed25519
               StrictHostKeyChecking no
@@ -790,7 +790,7 @@
         content: |
           Host gitea
               HostName 192.168.0.159
-              Port 2223
+              Port 2222
               User git
               IdentityFile ~/.ssh/pandora_gitea_ed25519
               StrictHostKeyChecking no
@@ -1454,7 +1454,7 @@
           - "=== Jade Platform Foundation Deployed ==="
           - "Jade LXC 201: 192.168.0.160 (Bun + Claude Code + OpenCode as 'jade' user)"
           - "Pandora LXC 202: 192.168.0.161 (Docker + traefik-kop + workspaces)"
-          - "Gitea: http://192.168.0.159:3000 (git.jnrm.eu, SSH port 2223)"
+          - "Gitea: http://192.168.0.159:3000 (git.jnrm.eu, SSH port 2222)"
           - "SSH: jade → pandora (.161), jade → live (.159), jade → gitea (SSH)"
           - "MCP: jade-knowledge + jade-journal on both Claude Code and OpenCode"
           - ""
