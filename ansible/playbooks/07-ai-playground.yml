@@ -754,7 +754,8 @@
             "log-opts": {
               "max-size": "10m",
               "max-file": "3"
-            }
+            },
+            "insecure-registries": ["192.168.0.159:3000"]
           }
         owner: root
         group: root
