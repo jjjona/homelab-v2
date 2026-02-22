@@ -324,6 +324,14 @@
         group: root
         mode: "0440"
 
+    - name: Create /mnt/workspaces for jade
+      ansible.builtin.file:
+        path: /mnt/workspaces
+        state: directory
+        owner: jade
+        group: jade
+        mode: "0755"
+
     - name: Create jade .ssh directory
       ansible.builtin.file:
         path: /home/jade/.ssh
