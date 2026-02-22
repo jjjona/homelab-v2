@@ -335,10 +335,6 @@ services:
       - GITEA__server__SSH_DOMAIN=192.168.0.159
       - GITEA__server__SSH_PORT=2223
       - GITEA__security__INSTALL_LOCK=true
-      - GITEA__service__DISABLE_REGISTRATION=false
-      - GITEA__service__ALLOW_ONLY_EXTERNAL_REGISTRATION=true
-      - GITEA__service__SHOW_REGISTRATION_BUTTON=false
-      - GITEA__database__DB_TYPE=sqlite3
     volumes:
       - /mnt/data/docker/gitea/data:/data
     env_file: .env
