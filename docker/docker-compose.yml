@@ -331,10 +331,11 @@ services:
     environment:
       - USER_UID=1000
       - USER_GID=1000
-      - GITEA__server__ROOT_URL=https://git.${DOMAIN}
+      - GITEA__server__ROOT_URL=http://192.168.0.159:3000
       - GITEA__server__SSH_DOMAIN=192.168.0.159
       - GITEA__server__SSH_PORT=2222
       - GITEA__security__INSTALL_LOCK=true
+      - GITEA__packages__ENABLED=true
     volumes:
       - /mnt/data/docker/gitea/data:/data
     env_file: .env

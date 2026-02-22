@@ -675,6 +675,9 @@
   gather_facts: false
   tags: [pandora, docker]
 
+  vars:
+    ai_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/ai-playground.sops.yml') | from_yaml }}"
+
   tasks:
 
     - name: Wait for SSH connection
@@ -920,6 +923,14 @@
       ansible.builtin.debug:
         var: kop_status.stdout_lines
 
+    # --- Docker registry login ---
+
+    - name: Login to Gitea container registry
+      ansible.builtin.shell:
+        cmd: echo '{{ ai_secrets.gitea_jade_password }}' | docker login 192.168.0.159:3000 -u {{ ai_secrets.gitea_jade_user }} --password-stdin
+      no_log: true
+      changed_when: true
+
   handlers:
     - name: restart docker
       ansible.builtin.systemd:
@@ -1148,6 +1159,14 @@
         user: root
         key: "{{ hostvars['localhost']['jade_docker_ssh_pubkey'] }}"
         state: present
+
+    # --- Docker registry login ---
+
+    - name: Login to Gitea container registry on Docker host
+      ansible.builtin.shell:
+        cmd: echo '{{ ai_secrets.gitea_jade_password }}' | docker login 192.168.0.159:3000 -u {{ ai_secrets.gitea_jade_user }} --password-stdin
+      no_log: true
+      changed_when: true
 
     # --- Verify Gitea via Traefik ---
 
