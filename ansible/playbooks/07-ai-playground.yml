@@ -62,6 +62,7 @@
     ct_rootfs_size: 20
     ct_template: debian-12-standard_12.12-1_amd64.tar.zst
     ct_template_storage: local
+    ct_fuse: true
     ssh_pubkey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFG9NoQSuVYiBD5fib0bN43e2UWwH5iEeDy99cCsHrHC"
 
   tasks:
@@ -116,6 +117,15 @@
             --onboot 1
             --start 0
             --ssh-public-keys /tmp/ct-ssh-pubkey.pub
+
+        - name: Add FUSE device passthrough for LXC {{ ct_id }}
+          ansible.builtin.blockinfile:
+            path: "/etc/pve/lxc/{{ ct_id }}.conf"
+            block: |
+              lxc.mount.entry: /dev/fuse dev/fuse none bind,create=file 0 0
+              lxc.cgroup2.devices.allow: c 10:229 rwm
+            marker: "# {mark} ANSIBLE MANAGED - FUSE"
+          when: ct_fuse | default(false)
 
         - name: Start LXC {{ ct_id }}
           ansible.builtin.command: pct start {{ ct_id }}
@@ -223,6 +233,15 @@
             --onboot 1
             --start 0
             --ssh-public-keys /tmp/ct-ssh-pubkey.pub
+
+        - name: Add FUSE device passthrough for LXC {{ ct_id }}
+          ansible.builtin.blockinfile:
+            path: "/etc/pve/lxc/{{ ct_id }}.conf"
+            block: |
+              lxc.mount.entry: /dev/fuse dev/fuse none bind,create=file 0 0
+              lxc.cgroup2.devices.allow: c 10:229 rwm
+            marker: "# {mark} ANSIBLE MANAGED - FUSE"
+          when: ct_fuse | default(false)
 
         - name: Start LXC {{ ct_id }}
           ansible.builtin.command: pct start {{ ct_id }}
