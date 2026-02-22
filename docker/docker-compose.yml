@@ -322,22 +322,6 @@ services:
       web:
         ipv4_address: 172.20.0.21
 
-  forgejo-runner:
-    image: code.forgejo.org/forgejo/runner:6
-    container_name: forgejo-runner
-    command: forgejo-runner daemon -c /data/config.yaml
-    user: "0:0"
-    working_dir: /data
-    volumes:
-      - /mnt/data/docker/forgejo-runner:/data
-      - /var/run/docker.sock:/var/run/docker.sock
-    restart: unless-stopped
-    depends_on:
-      - forgejo
-    networks:
-      web:
-        ipv4_address: 172.20.0.23
-
   gitea:
     image: gitea/gitea:1
     container_name: gitea
