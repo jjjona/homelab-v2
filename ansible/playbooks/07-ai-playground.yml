@@ -1,28 +1,59 @@
 ---
 # 07-ai-playground.yml
-# Creates an AI Agent Playground with two LXCs and a Forgejo git server:
-#   - Claude LXC 201 (.160): Node.js + Claude Code CLI + git (runs as `claude` user)
-#   - Pandora LXC 202 (.161): Docker Engine + git + traefik-kop (Claude's sandbox)
-#   - Forgejo on existing docker-host compose stack (git.jnrm.eu)
+# Creates the Jade Platform Foundation with two LXCs and Gitea integration:
+#   - Jade LXC 201 (.160): Bun + Claude Code + OpenCode CLI + git (runs as `jade` user)
+#   - Pandora LXC 202 (.161): Docker Engine + git + traefik-kop (sandbox node)
+#   - Gitea on existing docker-host compose stack (git.jnrm.eu, port 3001)
+#   - SSH-based git access to Gitea (port 2223) for jade user
+#   - MCP servers (jade-knowledge + jade-journal) for both Claude Code and OpenCode
+#   - Persona slash commands via jade-prompts repo
 #
-# Claude can SSH into Pandora and push/pull repos from Forgejo.
-# traefik-kop on Pandora syncs Docker labels to Traefik via Redis,
-# so Claude Code can expose containers by adding standard Traefik labels.
-# Claude Code auth is manual (interactive login after deploy).
+# 3-node architecture: Jade (.160) / Pandora (.161) / Live (.159)
+# jade can SSH into Pandora and Live, push/pull repos from Gitea via SSH.
+# traefik-kop on Pandora syncs Docker labels to Traefik via Redis.
+# Claude Code / OpenCode auth is manual (interactive login after deploy).
+#
+# Run with --tags destroy to tear down old LXCs first:
+#   ansible-playbook playbooks/07-ai-playground.yml --tags destroy
 #
 # Safe to re-run: LXC creation skips if already running,
-# Forgejo user creation skips if users exist.
+# Gitea user creation skips if users exist.
 
 # =============================================================
-# Play 1: Proxmox — Create Claude LXC 201
+# Play 0: Destroy old LXCs (only with --tags destroy)
 # =============================================================
-- name: Create Claude LXC
+- name: Destroy old LXCs
   hosts: proxmox
   gather_facts: false
+  tags: [destroy, never]
+
+  tasks:
+
+    - name: Stop and destroy LXC 201 (claude/jade)
+      ansible.builtin.shell: pct stop 201 && pct destroy 201
+      ignore_errors: true
+      changed_when: true
+
+    - name: Stop and destroy LXC 202 (pandora)
+      ansible.builtin.shell: pct stop 202 && pct destroy 202
+      ignore_errors: true
+      changed_when: true
+
+    - name: Show destruction complete
+      ansible.builtin.debug:
+        msg: "Old LXCs 201 + 202 destroyed. Re-run without --tags destroy to recreate."
+
+# =============================================================
+# Play 1: Proxmox — Create Jade LXC 201
+# =============================================================
+- name: Create Jade LXC
+  hosts: proxmox
+  gather_facts: false
+  tags: [create, jade]
 
   vars:
     ct_id: 201
-    ct_hostname: claude
+    ct_hostname: jade
     ct_ip: 192.168.0.160
     ct_gw: 192.168.0.1
     ct_memory: 8192
@@ -125,13 +156,14 @@
 - name: Create Pandora LXC
   hosts: proxmox
   gather_facts: false
+  tags: [create, pandora]
 
   vars:
     ct_id: 202
     ct_hostname: pandora
     ct_ip: 192.168.0.161
     ct_gw: 192.168.0.1
-    ct_memory: 4096
+    ct_memory: 8192
     ct_swap: 2048
     ct_cores: 4
     ct_rootfs_size: 50
@@ -226,11 +258,15 @@
         var: ct_status.stdout
 
 # =============================================================
-# Play 3: Claude LXC — Install Claude Code + git
+# Play 3: Jade LXC — Install tools + configure
 # =============================================================
-- name: Install Claude Code on Claude LXC
-  hosts: claude
+- name: Install tools on Jade LXC
+  hosts: jade
   gather_facts: false
+  tags: [jade, tools]
+
+  vars:
+    ai_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/ai-playground.sops.yml') | from_yaml }}"
 
   tasks:
 
@@ -253,114 +289,325 @@
           - gnupg
           - python3
           - sudo
+          - unzip
         state: present
         update_cache: true
 
-    # --- Create claude user (Claude Code can't run as root) ---
+    # --- Create jade user (Claude Code / OpenCode can't run as root) ---
 
-    - name: Create claude user
+    - name: Create jade group
+      ansible.builtin.group:
+        name: jade
+        state: present
+
+    - name: Create jade user
       ansible.builtin.user:
-        name: claude
+        name: jade
+        group: jade
         shell: /bin/bash
         groups: sudo
         append: true
         create_home: true
 
-    - name: Allow claude passwordless sudo
+    - name: Allow jade passwordless sudo
       ansible.builtin.copy:
-        dest: /etc/sudoers.d/claude
-        content: "claude ALL=(ALL) NOPASSWD:ALL\n"
+        dest: /etc/sudoers.d/jade
+        content: "jade ALL=(ALL) NOPASSWD:ALL\n"
         owner: root
         group: root
         mode: "0440"
 
-    - name: Create claude .ssh directory
+    - name: Create jade .ssh directory
       ansible.builtin.file:
-        path: /home/claude/.ssh
+        path: /home/jade/.ssh
         state: directory
-        owner: claude
-        group: claude
+        owner: jade
+        group: jade
         mode: "0700"
 
-    - name: Copy SSH authorized_keys to claude user
+    - name: Copy SSH authorized_keys to jade user
       ansible.builtin.copy:
         src: /root/.ssh/authorized_keys
-        dest: /home/claude/.ssh/authorized_keys
-        owner: claude
-        group: claude
+        dest: /home/jade/.ssh/authorized_keys
+        owner: jade
+        group: jade
         mode: "0600"
         remote_src: true
 
-    # --- Claude Code CLI (native installer) ---
+    # --- Install Bun ---
+
+    - name: Install Bun
+      ansible.builtin.shell: curl -fsSL https://bun.sh/install | bash
+      become: true
+      become_user: jade
+      args:
+        creates: /home/jade/.bun/bin/bun
+
+    - name: Add Bun to jade PATH in .bashrc
+      ansible.builtin.lineinfile:
+        path: /home/jade/.bashrc
+        line: 'export PATH="$HOME/.bun/bin:$PATH"'
+        state: present
+      become: true
+      become_user: jade
+
+    # --- Install Claude Code CLI ---
 
     - name: Install Claude Code CLI
       ansible.builtin.shell: curl -fsSL https://claude.ai/install.sh | bash
       become: true
-      become_user: claude
+      become_user: jade
       args:
-        creates: /home/claude/.local/bin/claude
+        creates: /home/jade/.local/bin/claude
 
-    - name: Verify Claude Code version
-      ansible.builtin.command: /home/claude/.local/bin/claude --version
+    # --- Install OpenCode CLI ---
+
+    - name: Install OpenCode CLI
+      ansible.builtin.shell: curl -fsSL https://opencode.ai/install | bash
       become: true
-      become_user: claude
-      register: claude_version
-      changed_when: false
+      become_user: jade
+      args:
+        creates: /home/jade/.opencode/bin/opencode
+      environment:
+        HOME: /home/jade
 
-    - name: Show Claude Code version
-      ansible.builtin.debug:
-        var: claude_version.stdout
+    - name: Add local bin and opencode to jade PATH in .bashrc
+      ansible.builtin.lineinfile:
+        path: /home/jade/.bashrc
+        line: 'export PATH="$HOME/.local/bin:$HOME/.opencode/bin:$PATH"'
+        state: present
+      become: true
+      become_user: jade
 
-    # --- SSH key for Pandora access (claude user) ---
+    # --- Configure Claude Code settings ---
+
+    - name: Create Claude Code config directory
+      ansible.builtin.file:
+        path: /home/jade/.claude
+        state: directory
+        owner: jade
+        group: jade
+        mode: "0755"
+
+    - name: Write Claude Code settings.json
+      ansible.builtin.copy:
+        dest: /home/jade/.claude/settings.json
+        content: |
+          {
+            "permissions": {
+              "defaultMode": "bypassPermissions"
+            },
+            "skipDangerousModePermissionPrompt": true
+          }
+        owner: jade
+        group: jade
+        mode: "0644"
+
+    # --- Configure MCP for Claude Code ---
+
+    - name: Write Claude Code MCP config (.claude.json)
+      ansible.builtin.copy:
+        dest: /home/jade/.claude.json
+        content: |
+          {
+            "projects": {
+              "/home/jade": {
+                "mcpServers": {
+                  "jade-knowledge": {
+                    "type": "http",
+                    "url": "https://knowledge.jnrm.eu/mcp",
+                    "headers": {
+                      "Authorization": "Bearer {{ ai_secrets.mcp_claude_knowledge_token }}"
+                    }
+                  },
+                  "jade-journal": {
+                    "type": "http",
+                    "url": "https://journal.jnrm.eu/mcp",
+                    "headers": {
+                      "Authorization": "Bearer {{ ai_secrets.mcp_claude_journal_token }}"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        owner: jade
+        group: jade
+        mode: "0600"
+      no_log: true
+
+    # --- Configure MCP for OpenCode ---
+
+    - name: Create OpenCode config directory
+      ansible.builtin.file:
+        path: /home/jade/.config/opencode
+        state: directory
+        owner: jade
+        group: jade
+        mode: "0755"
+
+    - name: Write OpenCode config (opencode.json)
+      ansible.builtin.copy:
+        dest: /home/jade/.config/opencode/opencode.json
+        content: |
+          {
+            "$schema": "https://opencode.ai/config.json",
+            "model": "github-copilot/gpt-5-mini",
+            "permission": "allow",
+            "mcp": {
+              "jade-knowledge": {
+                "type": "remote",
+                "url": "https://knowledge.jnrm.eu/mcp",
+                "headers": {
+                  "Authorization": "Bearer {{ ai_secrets.mcp_opencode_knowledge_token }}"
+                }
+              },
+              "jade-journal": {
+                "type": "remote",
+                "url": "https://journal.jnrm.eu/mcp",
+                "headers": {
+                  "Authorization": "Bearer {{ ai_secrets.mcp_opencode_journal_token }}"
+                }
+              }
+            }
+          }
+        owner: jade
+        group: jade
+        mode: "0600"
+      no_log: true
+
+    # --- SSH keys ---
 
     - name: Generate SSH key for Pandora access
       ansible.builtin.command: >
-        ssh-keygen -t ed25519 -f /home/claude/.ssh/claude_pandora_ed25519 -N "" -C "claude@claude-lxc"
+        ssh-keygen -t ed25519 -f /home/jade/.ssh/jade_pandora_ed25519 -N "" -C "jade@jade-lxc"
       args:
-        creates: /home/claude/.ssh/claude_pandora_ed25519
+        creates: /home/jade/.ssh/jade_pandora_ed25519
       become: true
-      become_user: claude
+      become_user: jade
+
+    - name: Generate SSH key for Docker host / Live access
+      ansible.builtin.command: >
+        ssh-keygen -t ed25519 -f /home/jade/.ssh/jade_docker_ed25519 -N "" -C "jade@jade-lxc-docker"
+      args:
+        creates: /home/jade/.ssh/jade_docker_ed25519
+      become: true
+      become_user: jade
+
+    - name: Generate SSH key for Gitea access
+      ansible.builtin.command: >
+        ssh-keygen -t ed25519 -f /home/jade/.ssh/jade_gitea_ed25519 -N "" -C "jade@jade-lxc-gitea"
+      args:
+        creates: /home/jade/.ssh/jade_gitea_ed25519
+      become: true
+      become_user: jade
 
     - name: Fix SSH key ownership
       ansible.builtin.file:
         path: "{{ item }}"
-        owner: claude
-        group: claude
+        owner: jade
+        group: jade
       loop:
-        - /home/claude/.ssh/claude_pandora_ed25519
-        - /home/claude/.ssh/claude_pandora_ed25519.pub
+        - /home/jade/.ssh/jade_pandora_ed25519
+        - /home/jade/.ssh/jade_pandora_ed25519.pub
+        - /home/jade/.ssh/jade_docker_ed25519
+        - /home/jade/.ssh/jade_docker_ed25519.pub
+        - /home/jade/.ssh/jade_gitea_ed25519
+        - /home/jade/.ssh/jade_gitea_ed25519.pub
 
-    - name: Write SSH config for Pandora
+    # --- SSH config ---
+
+    - name: Write SSH config
       ansible.builtin.copy:
-        dest: /home/claude/.ssh/config
+        dest: /home/jade/.ssh/config
         content: |
           Host pandora
               HostName 192.168.0.161
               User root
-              IdentityFile /home/claude/.ssh/claude_pandora_ed25519
+              IdentityFile ~/.ssh/jade_pandora_ed25519
               StrictHostKeyChecking no
               UserKnownHostsFile /dev/null
-        owner: claude
-        group: claude
+
+          Host live
+              HostName 192.168.0.159
+              User root
+              IdentityFile ~/.ssh/jade_docker_ed25519
+              StrictHostKeyChecking no
+              UserKnownHostsFile /dev/null
+
+          Host gitea
+              HostName 192.168.0.159
+              Port 2223
+              User git
+              IdentityFile ~/.ssh/jade_gitea_ed25519
+              StrictHostKeyChecking no
+              UserKnownHostsFile /dev/null
+        owner: jade
+        group: jade
         mode: "0600"
 
-    - name: Read Claude's public key
-      ansible.builtin.slurp:
-        src: /home/claude/.ssh/claude_pandora_ed25519.pub
-      register: claude_pubkey
+    # --- Store SSH public keys as facts for other plays ---
 
-    - name: Store Claude's public key as fact on localhost
+    - name: Read jade Pandora public key
+      ansible.builtin.slurp:
+        src: /home/jade/.ssh/jade_pandora_ed25519.pub
+      register: jade_pandora_pubkey
+
+    - name: Store jade Pandora public key as fact
       ansible.builtin.set_fact:
-        claude_ssh_pubkey: "{{ claude_pubkey.content | b64decode | trim }}"
+        jade_pandora_ssh_pubkey: "{{ jade_pandora_pubkey.content | b64decode | trim }}"
       delegate_to: localhost
       delegate_facts: true
 
+    - name: Read jade Docker host public key
+      ansible.builtin.slurp:
+        src: /home/jade/.ssh/jade_docker_ed25519.pub
+      register: jade_docker_pubkey
+
+    - name: Store jade Docker host public key as fact
+      ansible.builtin.set_fact:
+        jade_docker_ssh_pubkey: "{{ jade_docker_pubkey.content | b64decode | trim }}"
+      delegate_to: localhost
+      delegate_facts: true
+
+    - name: Read jade Gitea public key
+      ansible.builtin.slurp:
+        src: /home/jade/.ssh/jade_gitea_ed25519.pub
+      register: jade_gitea_pubkey
+
+    - name: Store jade Gitea public key as fact
+      ansible.builtin.set_fact:
+        jade_gitea_ssh_pubkey: "{{ jade_gitea_pubkey.content | b64decode | trim }}"
+      delegate_to: localhost
+      delegate_facts: true
+
+    # --- Git config ---
+
+    - name: Configure git user name
+      ansible.builtin.command: git config --global user.name jade
+      become: true
+      become_user: jade
+      changed_when: false
+
+    - name: Configure git user email
+      ansible.builtin.command: git config --global user.email jade@jnrm.eu
+      become: true
+      become_user: jade
+      changed_when: false
+
+    - name: Configure git SSH rewrite for Gitea
+      ansible.builtin.command: git config --global url."git@gitea:jade/".insteadOf "https://git.jnrm.eu/jade/"
+      become: true
+      become_user: jade
+      changed_when: false
+
 # =============================================================
-# Play 4: Pandora LXC — Install Docker + git + traefik-kop
+# Play 4: Pandora LXC — Install Docker + traefik-kop + git
 # =============================================================
 - name: Install Docker on Pandora LXC
   hosts: pandora
   gather_facts: false
+  tags: [pandora, docker]
 
   tasks:
 
@@ -385,12 +632,12 @@
         state: present
         update_cache: true
 
-    # --- Authorize Claude's SSH key ---
+    # --- Authorize Jade's SSH key ---
 
-    - name: Add Claude's SSH key to authorized_keys
+    - name: Add Jade's SSH key to authorized_keys
       ansible.posix.authorized_key:
         user: root
-        key: "{{ hostvars['localhost']['claude_ssh_pubkey'] }}"
+        key: "{{ hostvars['localhost']['jade_pandora_ssh_pubkey'] }}"
         state: present
 
     # --- Docker official repo ---
@@ -441,7 +688,8 @@
             "log-opts": {
               "max-size": "10m",
               "max-file": "3"
-            }
+            },
+            "insecure-registries": ["192.168.0.159:3000"]
           }
         owner: root
         group: root
@@ -500,6 +748,72 @@
         chdir: /opt/traefik-kop
       changed_when: true
 
+    # --- Workspaces foundation ---
+
+    - name: Create workspaces directory
+      ansible.builtin.file:
+        path: /opt/workspaces
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    # --- Gitea SSH key for Pandora ---
+
+    - name: Create Pandora .ssh directory
+      ansible.builtin.file:
+        path: /root/.ssh
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Generate SSH key for Gitea access on Pandora
+      ansible.builtin.command: >
+        ssh-keygen -t ed25519 -f /root/.ssh/pandora_gitea_ed25519 -N "" -C "pandora@pandora-lxc-gitea"
+      args:
+        creates: /root/.ssh/pandora_gitea_ed25519
+
+    - name: Read Pandora Gitea public key
+      ansible.builtin.slurp:
+        src: /root/.ssh/pandora_gitea_ed25519.pub
+      register: pandora_gitea_pubkey
+
+    - name: Store Pandora Gitea public key as fact
+      ansible.builtin.set_fact:
+        pandora_gitea_ssh_pubkey: "{{ pandora_gitea_pubkey.content | b64decode | trim }}"
+      delegate_to: localhost
+      delegate_facts: true
+
+    - name: Write SSH config for Gitea
+      ansible.builtin.copy:
+        dest: /root/.ssh/config
+        content: |
+          Host gitea
+              HostName 192.168.0.159
+              Port 2223
+              User git
+              IdentityFile ~/.ssh/pandora_gitea_ed25519
+              StrictHostKeyChecking no
+              UserKnownHostsFile /dev/null
+        owner: root
+        group: root
+        mode: "0600"
+
+    # --- Git config ---
+
+    - name: Configure git user name
+      ansible.builtin.command: git config --global user.name jade
+      changed_when: false
+
+    - name: Configure git user email
+      ansible.builtin.command: git config --global user.email jade@jnrm.eu
+      changed_when: false
+
+    - name: Configure git SSH rewrite for Gitea
+      ansible.builtin.command: git config --global url."git@gitea:jade/".insteadOf "https://git.jnrm.eu/jade/"
+      changed_when: false
+
     # --- Verify ---
 
     - name: Check Docker version
@@ -547,11 +861,12 @@
         state: restarted
 
 # =============================================================
-# Play 5: Docker host — Deploy Forgejo + create users
+# Play 5: Docker host — Deploy Forgejo + Gitea + create users
 # =============================================================
 - name: Deploy Forgejo and create users
   hosts: docker_host
   gather_facts: false
+  tags: [forgejo]
 
   vars:
     project_dir: /mnt/data/docker/core
@@ -566,9 +881,6 @@
   tasks:
 
     # --- Create Forgejo data directory ---
-    # Forgejo runs as uid 1000 (git user) inside container.
-    # In unprivileged LXC, uid 1000 maps to host uid 101000.
-    # But from inside the LXC, we just chown to 1000:1000.
 
     - name: Create Forgejo data directory
       ansible.builtin.file:
@@ -637,7 +949,7 @@
       when: ai_secrets.forgejo_admin_user not in forgejo_users.stdout
       no_log: true
 
-    # --- Create claude user ---
+    # --- Create claude user (Forgejo) ---
 
     - name: Create Forgejo claude user
       ansible.builtin.command:
@@ -650,9 +962,9 @@
       when: ai_secrets.forgejo_claude_user not in forgejo_users.stdout
       no_log: true
 
-    # --- Generate access token for Claude ---
+    # --- Generate access token for Claude (Forgejo) ---
 
-    - name: Check existing tokens via API
+    - name: Check existing Forgejo tokens via API
       ansible.builtin.uri:
         url: "http://127.0.0.1:3000/api/v1/users/{{ ai_secrets.forgejo_claude_user }}/tokens"
         method: GET
@@ -676,7 +988,7 @@
         label: "{{ item.name }}"
       no_log: true
 
-    - name: Generate fresh access token for Claude
+    - name: Generate fresh Forgejo access token for Claude
       ansible.builtin.command:
         cmd: >
           docker exec --user git forgejo forgejo admin user generate-access-token
@@ -687,12 +999,103 @@
       register: claude_token_result
       no_log: true
 
-    - name: Store Claude token as fact
+    - name: Store Claude Forgejo token as fact
       ansible.builtin.set_fact:
         claude_forgejo_token: "{{ claude_token_result.stdout | trim }}"
       delegate_to: localhost
       delegate_facts: true
       no_log: true
+
+    # --- Configure Docker daemon (insecure-registries) ---
+
+    - name: Configure Docker daemon on docker host
+      ansible.builtin.copy:
+        dest: /etc/docker/daemon.json
+        content: |
+          {
+            "storage-driver": "overlay2",
+            "log-driver": "json-file",
+            "log-opts": {
+              "max-size": "10m",
+              "max-file": "3"
+            },
+            "insecure-registries": ["192.168.0.159:3000"]
+          }
+        owner: root
+        group: root
+        mode: "0644"
+      notify: restart docker
+
+    # --- Authorize Jade's SSH key for Docker host ---
+
+    - name: Add Jade's Docker host SSH key to authorized_keys
+      ansible.posix.authorized_key:
+        user: root
+        key: "{{ hostvars['localhost']['jade_docker_ssh_pubkey'] }}"
+        state: present
+
+    # --- Runner registration ---
+
+    - name: Create runner data directory
+      ansible.builtin.file:
+        path: /mnt/data/docker/forgejo-runner
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Copy runner config.yaml
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../docker/forgejo-runner/config.yaml"
+        dest: /mnt/data/docker/forgejo-runner/config.yaml
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Check if runner is already registered
+      ansible.builtin.stat:
+        path: /mnt/data/docker/forgejo-runner/.runner
+      register: runner_file
+
+    - name: Register Forgejo runner
+      when: not runner_file.stat.exists
+      block:
+
+        - name: Generate runner registration token
+          ansible.builtin.command:
+            cmd: docker exec --user git forgejo forgejo actions generate-runner-token
+          register: runner_token
+
+        - name: Register runner with Forgejo
+          ansible.builtin.command:
+            cmd: >
+              docker compose run --rm forgejo-runner
+              forgejo-runner register --no-interactive
+              --instance http://192.168.0.159:3000
+              --token {{ runner_token.stdout | trim }}
+              --name homelab-runner
+              --labels "docker:docker://node:22-bookworm,ubuntu-latest:docker://ubuntu:22.04"
+            chdir: "{{ project_dir }}"
+
+    - name: Ensure runner is running
+      ansible.builtin.command:
+        cmd: docker compose up -d forgejo-runner
+        chdir: "{{ project_dir }}"
+      changed_when: true
+
+    - name: Wait for runner to connect
+      ansible.builtin.pause:
+        seconds: 10
+
+    - name: Verify runner container is running
+      ansible.builtin.command:
+        cmd: docker inspect --format "{% raw %}{{.State.Status}}{% endraw %}" forgejo-runner
+      register: runner_status
+      changed_when: false
+
+    - name: Show runner status
+      ansible.builtin.debug:
+        msg: "Forgejo runner: {{ runner_status.stdout }}"
 
     # --- Verify Forgejo via Traefik ---
 
@@ -700,8 +1103,8 @@
       ansible.builtin.uri:
         url: "http://localhost:80/"
         headers:
-          Host: "git.{{ secrets.domain }}"
-        status_code: [200, 302]
+          Host: "gitarchive.{{ secrets.domain }}"
+        status_code: [200, 302, 401]
       register: forgejo_traefik_check
       retries: 3
       delay: 5
@@ -709,96 +1112,423 @@
 
     - name: Show Forgejo via Traefik result
       ansible.builtin.debug:
-        msg: "Forgejo via Traefik: HTTP {{ forgejo_traefik_check.status }}"
+        msg: "Forgejo via Traefik: HTTP {{ forgejo_traefik_check.status }} (401 = tinyauth protecting, expected)"
+
+  handlers:
+    - name: restart docker
+      ansible.builtin.systemd:
+        name: docker
+        state: restarted
 
 # =============================================================
-# Play 6: Claude + Pandora — Configure git credentials
+# Play 5b: Docker host — Deploy Gitea + create users
 # =============================================================
-- name: Configure git on Claude LXC
-  hosts: claude
+- name: Deploy Gitea and create users
+  hosts: docker_host
   gather_facts: false
+  tags: [gitea]
+
+  vars:
+    project_dir: /mnt/data/docker/core
+    secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../../docker/secrets.sops.yml') | from_yaml }}"
+    ai_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/ai-playground.sops.yml') | from_yaml }}"
+
+  pre_tasks:
+    - name: Wait for SSH connection
+      ansible.builtin.wait_for_connection:
+        timeout: 60
+
+  tasks:
+
+    # --- Create Gitea data directory ---
+
+    - name: Create Gitea data directory
+      ansible.builtin.file:
+        path: /mnt/data/docker/gitea/data
+        state: directory
+        owner: "1000"
+        group: "1000"
+        mode: "0755"
+
+    # --- Copy updated compose ---
+
+    - name: Copy docker-compose.yml
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../docker/docker-compose.yml"
+        dest: "{{ project_dir }}/docker-compose.yml"
+        owner: root
+        group: root
+        mode: "0644"
+
+    # --- Deploy Gitea ---
+
+    - name: Pull Gitea image
+      ansible.builtin.command:
+        cmd: docker compose pull gitea
+        chdir: "{{ project_dir }}"
+      changed_when: true
+
+    - name: Start Gitea container
+      ansible.builtin.command:
+        cmd: docker compose up -d gitea
+        chdir: "{{ project_dir }}"
+      changed_when: true
+
+    # --- Wait for Gitea ---
+
+    - name: Wait for Gitea to be ready
+      ansible.builtin.uri:
+        url: http://127.0.0.1:3001
+        status_code: [200, 302]
+      register: gitea_ready
+      retries: 12
+      delay: 10
+      until: gitea_ready is not failed
+
+    - name: Show Gitea status
+      ansible.builtin.debug:
+        msg: "Gitea is up (HTTP {{ gitea_ready.status }})"
+
+    # --- Create admin user (jjjona) ---
+
+    - name: Check existing Gitea users
+      ansible.builtin.command:
+        cmd: docker exec --user 1000 gitea gitea admin user list
+      register: gitea_users
+      changed_when: false
+
+    - name: Create Gitea admin user (jjjona)
+      ansible.builtin.command:
+        cmd: >
+          docker exec --user 1000 gitea gitea admin user create
+          --username {{ ai_secrets.gitea_admin_user }}
+          --password {{ ai_secrets.gitea_admin_password }}
+          --email {{ ai_secrets.gitea_admin_email }}
+          --admin
+          --must-change-password=false
+      when: ai_secrets.gitea_admin_user not in gitea_users.stdout
+      no_log: true
+
+    # --- Create jade user ---
+
+    - name: Create Gitea jade user
+      ansible.builtin.command:
+        cmd: >
+          docker exec --user 1000 gitea gitea admin user create
+          --username {{ ai_secrets.gitea_jade_user }}
+          --password {{ ai_secrets.gitea_jade_password }}
+          --email {{ ai_secrets.gitea_jade_email }}
+          --must-change-password=false
+      when: ai_secrets.gitea_jade_user not in gitea_users.stdout
+      no_log: true
+
+    # --- Generate Gitea access token for jade (API access) ---
+
+    - name: Check existing Gitea tokens
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:3001/api/v1/users/{{ ai_secrets.gitea_jade_user }}/tokens"
+        method: GET
+        user: "{{ ai_secrets.gitea_jade_user }}"
+        password: "{{ ai_secrets.gitea_jade_password }}"
+        force_basic_auth: true
+        status_code: [200]
+      register: gitea_existing_tokens
+      no_log: true
+
+    - name: Delete old jade-api token if present
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:3001/api/v1/users/{{ ai_secrets.gitea_jade_user }}/tokens/{{ item.id }}"
+        method: DELETE
+        user: "{{ ai_secrets.gitea_jade_user }}"
+        password: "{{ ai_secrets.gitea_jade_password }}"
+        force_basic_auth: true
+        status_code: [204]
+      loop: "{{ gitea_existing_tokens.json | selectattr('name', 'equalto', 'jade-api') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+      no_log: true
+
+    - name: Generate fresh Gitea access token for jade
+      ansible.builtin.command:
+        cmd: >
+          docker exec --user 1000 gitea gitea admin user generate-access-token
+          --username {{ ai_secrets.gitea_jade_user }}
+          --token-name jade-api
+          --scopes all
+          --raw
+      register: jade_gitea_token_result
+      no_log: true
+
+    - name: Store jade Gitea token as fact
+      ansible.builtin.set_fact:
+        jade_gitea_token: "{{ jade_gitea_token_result.stdout | trim }}"
+      delegate_to: localhost
+      delegate_facts: true
+      no_log: true
+
+    # --- Register Jade's SSH key with Gitea ---
+
+    - name: Remove existing jade-lxc SSH key from Gitea (if any)
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:3001/api/v1/user/keys"
+        method: GET
+        headers:
+          Authorization: "token {{ hostvars['localhost']['jade_gitea_token'] }}"
+        status_code: [200]
+      register: gitea_ssh_keys
+      no_log: true
+
+    - name: Delete old jade-lxc SSH key
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:3001/api/v1/user/keys/{{ item.id }}"
+        method: DELETE
+        headers:
+          Authorization: "token {{ hostvars['localhost']['jade_gitea_token'] }}"
+        status_code: [204]
+      loop: "{{ gitea_ssh_keys.json | selectattr('title', 'equalto', 'jade-lxc') | list }}"
+      loop_control:
+        label: "{{ item.title }}"
+      no_log: true
+      when: gitea_ssh_keys.json | selectattr('title', 'equalto', 'jade-lxc') | list | length > 0
+
+    - name: Register Jade's SSH key with Gitea
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:3001/api/v1/user/keys"
+        method: POST
+        headers:
+          Authorization: "token {{ hostvars['localhost']['jade_gitea_token'] }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          title: "jade-lxc"
+          key: "{{ hostvars['localhost']['jade_gitea_ssh_pubkey'] }}"
+        status_code: [201]
+      no_log: true
+
+    # --- Register Pandora's SSH key with Gitea ---
+
+    - name: Delete old pandora-lxc SSH key
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:3001/api/v1/user/keys/{{ item.id }}"
+        method: DELETE
+        headers:
+          Authorization: "token {{ hostvars['localhost']['jade_gitea_token'] }}"
+        status_code: [204]
+      loop: "{{ gitea_ssh_keys.json | selectattr('title', 'equalto', 'pandora-lxc') | list }}"
+      loop_control:
+        label: "{{ item.title }}"
+      no_log: true
+      when: gitea_ssh_keys.json | selectattr('title', 'equalto', 'pandora-lxc') | list | length > 0
+
+    - name: Register Pandora's SSH key with Gitea
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:3001/api/v1/user/keys"
+        method: POST
+        headers:
+          Authorization: "token {{ hostvars['localhost']['jade_gitea_token'] }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          title: "pandora-lxc"
+          key: "{{ hostvars['localhost']['pandora_gitea_ssh_pubkey'] }}"
+        status_code: [201]
+      no_log: true
+
+    # --- Verify Gitea via Traefik ---
+
+    - name: Verify Gitea via Traefik
+      ansible.builtin.uri:
+        url: "http://localhost:80/"
+        headers:
+          Host: "git.{{ secrets.domain }}"
+        status_code: [200, 302, 401]
+      register: gitea_traefik_check
+      retries: 3
+      delay: 5
+      until: gitea_traefik_check is not failed
+
+    - name: Show Gitea via Traefik result
+      ansible.builtin.debug:
+        msg: "Gitea via Traefik: HTTP {{ gitea_traefik_check.status }} (401 = tinyauth protecting, expected)"
+
+# =============================================================
+# Play 6: Jade + Pandora — Git credentials + repos
+# =============================================================
+- name: Configure git on Jade LXC
+  hosts: jade
+  gather_facts: false
+  tags: [git, jade]
 
   vars:
     ai_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/ai-playground.sops.yml') | from_yaml }}"
 
   tasks:
 
-    - name: Configure git user name
-      ansible.builtin.command: git config --global user.name claude
-      become: true
-      become_user: claude
-      changed_when: false
-
-    - name: Configure git user email
-      ansible.builtin.command: git config --global user.email claude@jnrm.eu
-      become: true
-      become_user: claude
-      changed_when: false
+    # --- HTTP token backup for Gitea API access ---
 
     - name: Configure git credential helper
       ansible.builtin.command: git config --global credential.helper store
       become: true
-      become_user: claude
+      become_user: jade
       changed_when: false
 
-    - name: Write git credentials file
+    - name: Write git credentials file (HTTP backup)
       ansible.builtin.copy:
-        dest: /home/claude/.git-credentials
-        content: "http://{{ ai_secrets.forgejo_claude_user }}:{{ hostvars['localhost']['claude_forgejo_token'] }}@192.168.0.159:3000\n"
-        owner: claude
-        group: claude
+        dest: /home/jade/.git-credentials
+        content: "http://{{ ai_secrets.gitea_jade_user }}:{{ hostvars['localhost']['jade_gitea_token'] }}@192.168.0.159:3001\n"
+        owner: jade
+        group: jade
         mode: "0600"
       no_log: true
 
-    # --- Verify SSH to Pandora ---
+    # --- Verify SSH to Pandora and Live ---
 
-    - name: Verify SSH from Claude to Pandora
+    - name: Verify SSH from Jade to Pandora
       ansible.builtin.command: ssh pandora whoami
       become: true
-      become_user: claude
-      register: ssh_test
+      become_user: jade
+      register: ssh_pandora_test
       changed_when: false
 
-    - name: Show SSH test result
+    - name: Show Pandora SSH test result
       ansible.builtin.debug:
-        msg: "SSH Claude → Pandora: {{ ssh_test.stdout }}"
+        msg: "SSH Jade → Pandora: {{ ssh_pandora_test.stdout }}"
+
+    - name: Verify SSH from Jade to Live
+      ansible.builtin.command: ssh live whoami
+      become: true
+      become_user: jade
+      register: ssh_live_test
+      changed_when: false
+
+    - name: Show Live SSH test result
+      ansible.builtin.debug:
+        msg: "SSH Jade → Live: {{ ssh_live_test.stdout }}"
+
+    # --- Clone jade-prompts and set up commands ---
+
+    - name: Clone jade-prompts from Gitea
+      ansible.builtin.git:
+        repo: git@gitea:jade/jade-prompts.git
+        dest: /home/jade/jade-prompts
+        accept_hostkey: true
+      become: true
+      become_user: jade
+      ignore_errors: true
+      register: jade_prompts_clone
+
+    - name: Show jade-prompts clone result
+      ansible.builtin.debug:
+        msg: "{{ 'jade-prompts cloned successfully' if jade_prompts_clone is succeeded else 'jade-prompts clone failed (repo may not exist yet on Gitea) — clone manually after backup restore' }}"
+
+    - name: Create Claude Code commands directory
+      ansible.builtin.file:
+        path: /home/jade/.claude/commands
+        state: directory
+        owner: jade
+        group: jade
+        mode: "0755"
+
+    - name: Symlink persona commands for Claude Code
+      ansible.builtin.file:
+        src: "/home/jade/jade-prompts/commands/{{ item }}"
+        dest: "/home/jade/.claude/commands/{{ item }}"
+        state: link
+        owner: jade
+        group: jade
+      loop:
+        - persona-architect.md
+        - persona-designer.md
+        - persona-developer.md
+        - persona-devops.md
+        - persona-researcher.md
+        - persona-trader.md
+        - persona-writer.md
+      when: jade_prompts_clone is succeeded
+
+    - name: Create OpenCode commands directory
+      ansible.builtin.file:
+        path: /home/jade/.config/opencode/commands
+        state: directory
+        owner: jade
+        group: jade
+        mode: "0755"
+
+    - name: Symlink persona commands for OpenCode
+      ansible.builtin.file:
+        src: "/home/jade/jade-prompts/commands/{{ item }}"
+        dest: "/home/jade/.config/opencode/commands/{{ item }}"
+        state: link
+        owner: jade
+        group: jade
+      loop:
+        - persona-architect.md
+        - persona-designer.md
+        - persona-developer.md
+        - persona-devops.md
+        - persona-researcher.md
+        - persona-trader.md
+        - persona-writer.md
+      when: jade_prompts_clone is succeeded
+
+    # --- Clone jade-soul and set up CLAUDE.md ---
+
+    - name: Clone jade-soul from Gitea
+      ansible.builtin.git:
+        repo: git@gitea:jade/jade-soul.git
+        dest: /home/jade/jade-soul
+        accept_hostkey: true
+      become: true
+      become_user: jade
+      ignore_errors: true
+      register: jade_soul_clone
+
+    - name: Copy jade-seed.md to CLAUDE.md
+      ansible.builtin.copy:
+        src: /home/jade/jade-soul/jade-seed.md
+        dest: /home/jade/.claude/CLAUDE.md
+        owner: jade
+        group: jade
+        mode: "0644"
+        remote_src: true
+      when: jade_soul_clone is succeeded
+
+    - name: Show jade-soul result
+      ansible.builtin.debug:
+        msg: "{{ 'CLAUDE.md written from jade-seed.md' if jade_soul_clone is succeeded else 'jade-soul clone failed (repo may not exist yet) — copy jade-seed.md manually after backup restore' }}"
 
 - name: Configure git on Pandora LXC
   hosts: pandora
   gather_facts: false
+  tags: [git, pandora]
 
   vars:
     ai_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/ai-playground.sops.yml') | from_yaml }}"
 
   tasks:
 
-    - name: Configure git user name
-      ansible.builtin.command: git config --global user.name claude
-      changed_when: false
-
-    - name: Configure git user email
-      ansible.builtin.command: git config --global user.email claude@jnrm.eu
-      changed_when: false
+    # --- HTTP token backup for Gitea API access ---
 
     - name: Configure git credential helper
       ansible.builtin.command: git config --global credential.helper store
       changed_when: false
 
-    - name: Write git credentials file
+    - name: Write git credentials file (HTTP backup)
       ansible.builtin.copy:
         dest: /root/.git-credentials
-        content: "http://{{ ai_secrets.forgejo_claude_user }}:{{ hostvars['localhost']['claude_forgejo_token'] }}@192.168.0.159:3000\n"
+        content: "http://{{ ai_secrets.gitea_jade_user }}:{{ hostvars['localhost']['jade_gitea_token'] }}@192.168.0.159:3001\n"
         owner: root
         group: root
         mode: "0600"
       no_log: true
 
 # =============================================================
-# Final verification
+# Play 7: Verification
 # =============================================================
 - name: Verify AI Playground
   hosts: proxmox
   gather_facts: false
+  tags: [verify]
 
   tasks:
 
@@ -811,24 +1541,36 @@
       ansible.builtin.debug:
         var: pct_list.stdout_lines
 
-    - name: Verify Claude LXC 201 is running
+    - name: Verify Jade LXC 201 is running
       ansible.builtin.assert:
         that: "'201' in pct_list.stdout"
-        fail_msg: "LXC 201 (claude) is not in pct list"
+        fail_msg: "LXC 201 (jade) is not in pct list"
 
     - name: Verify Pandora LXC 202 is running
       ansible.builtin.assert:
         that: "'202' in pct_list.stdout"
         fail_msg: "LXC 202 (pandora) is not in pct list"
 
-- name: Final checks on Claude
-  hosts: claude
+- name: Final checks on Jade
+  hosts: jade
   gather_facts: false
+  tags: [verify]
 
   tasks:
 
+    - name: Verify jade user exists
+      ansible.builtin.command: id jade
+      register: jade_user_check
+      changed_when: false
+
+    - name: Show jade user info
+      ansible.builtin.debug:
+        msg: "Jade user: {{ jade_user_check.stdout }}"
+
     - name: Verify Claude Code installed
-      ansible.builtin.command: claude --version
+      ansible.builtin.command: /home/jade/.local/bin/claude --version
+      become: true
+      become_user: jade
       register: claude_ver
       changed_when: false
 
@@ -836,28 +1578,79 @@
       ansible.builtin.debug:
         msg: "Claude Code: {{ claude_ver.stdout }}"
 
-    - name: Verify claude user exists
-      ansible.builtin.command: id claude
-      register: claude_user_check
+    - name: Verify OpenCode installed
+      ansible.builtin.stat:
+        path: /home/jade/.opencode/bin/opencode
+      register: opencode_bin
+
+    - name: Show OpenCode status
+      ansible.builtin.debug:
+        msg: "OpenCode: {{ 'installed at ~/.opencode/bin/opencode' if opencode_bin.stat.exists else 'NOT FOUND' }}"
+
+    - name: Verify Bun installed
+      ansible.builtin.shell: /home/jade/.bun/bin/bun --version
+      become: true
+      become_user: jade
+      register: bun_ver
       changed_when: false
 
-    - name: Show claude user info
+    - name: Show Bun version
       ansible.builtin.debug:
-        msg: "Claude user: {{ claude_user_check.stdout }}"
+        msg: "Bun: {{ bun_ver.stdout }}"
 
-    - name: Verify git credentials work
-      ansible.builtin.command: git ls-remote http://192.168.0.159:3000/{{ item }}/
-      loop:
-        - claude
-      register: git_test
+    - name: Verify CLAUDE.md exists
+      ansible.builtin.stat:
+        path: /home/jade/.claude/CLAUDE.md
+      register: claude_md_stat
+
+    - name: Show CLAUDE.md status
+      ansible.builtin.debug:
+        msg: "{{ 'CLAUDE.md exists' if claude_md_stat.stat.exists else 'CLAUDE.md missing — copy jade-seed.md manually' }}"
+
+    - name: Verify MCP config exists
+      ansible.builtin.stat:
+        path: /home/jade/.claude.json
+      register: claude_json_stat
+
+    - name: Show MCP config status
+      ansible.builtin.debug:
+        msg: "{{ '.claude.json MCP config exists' if claude_json_stat.stat.exists else '.claude.json missing!' }}"
+
+    - name: Verify OpenCode config exists
+      ansible.builtin.stat:
+        path: /home/jade/.config/opencode/opencode.json
+      register: opencode_json_stat
+
+    - name: Show OpenCode config status
+      ansible.builtin.debug:
+        msg: "{{ 'opencode.json config exists' if opencode_json_stat.stat.exists else 'opencode.json missing!' }}"
+
+    - name: Check Claude Code commands
+      ansible.builtin.command: ls /home/jade/.claude/commands/
+      register: claude_commands
       changed_when: false
       ignore_errors: true
+
+    - name: Show Claude Code commands
+      ansible.builtin.debug:
+        msg: "Claude commands: {{ claude_commands.stdout_lines | default(['none — jade-prompts not cloned']) }}"
+
+    - name: Verify git SSH access to Gitea
+      ansible.builtin.command: ssh gitea -T
       become: true
-      become_user: claude
+      become_user: jade
+      register: git_ssh_test
+      changed_when: false
+      ignore_errors: true
+
+    - name: Show git SSH test result
+      ansible.builtin.debug:
+        msg: "Git SSH: {{ git_ssh_test.stderr | default(git_ssh_test.stdout) }}"
 
 - name: Final checks on Pandora
   hosts: pandora
   gather_facts: false
+  tags: [verify]
 
   tasks:
 
@@ -881,22 +1674,52 @@
       ansible.builtin.debug:
         var: kop_check.stdout_lines
 
+    - name: Verify Pandora git SSH access to Gitea
+      ansible.builtin.command: ssh gitea -T
+      register: pandora_git_test
+      changed_when: false
+      ignore_errors: true
+
+    - name: Show Pandora git SSH result
+      ansible.builtin.debug:
+        msg: "Pandora Git SSH: {{ pandora_git_test.stderr | default(pandora_git_test.stdout) }}"
+
+    - name: Verify workspaces directory
+      ansible.builtin.stat:
+        path: /opt/workspaces
+      register: workspaces_stat
+
+    - name: Show workspaces status
+      ansible.builtin.debug:
+        msg: "{{ '/opt/workspaces exists' if workspaces_stat.stat.exists else '/opt/workspaces missing!' }}"
+
 - name: Summary
   hosts: localhost
   gather_facts: false
   connection: local
+  tags: [verify]
 
   tasks:
     - name: Show deployment summary
       ansible.builtin.debug:
         msg:
-          - "=== AI Playground Deployed ==="
-          - "Claude LXC 201: 192.168.0.160 (Node.js + Claude Code as 'claude' user)"
-          - "Pandora LXC 202: 192.168.0.161 (Docker + traefik-kop)"
-          - "Forgejo: http://192.168.0.159:3000 (git.jnrm.eu)"
+          - "=== Jade Platform Foundation Deployed ==="
+          - "Jade LXC 201: 192.168.0.160 (Bun + Claude Code + OpenCode as 'jade' user)"
+          - "Pandora LXC 202: 192.168.0.161 (Docker + traefik-kop + workspaces)"
+          - "Forgejo: http://192.168.0.159:3000 (gitarchive.jnrm.eu)"
+          - "Gitea: http://192.168.0.159:3001 (git.jnrm.eu, SSH port 2223)"
+          - "Forgejo Runner: homelab-runner (Actions CI/CD)"
+          - "Container Registry: 192.168.0.159:3000/v2/"
+          - "SSH: jade → pandora (.161), jade → live (.159), jade → gitea (SSH)"
+          - "MCP: jade-knowledge + jade-journal on both Claude Code and OpenCode"
+          - ""
+          - "3-Node Architecture:"
+          - "  Jade (.160)   = brain (Claude Code + OpenCode)"
+          - "  Pandora (.161) = sandbox (Docker workspaces)"
+          - "  Live (.159)    = production (Traefik + services)"
           - ""
           - "Next steps:"
-          - "  1. SSH to Claude LXC: ssh claude@192.168.0.160"
-          - "  2. Run 'claude' for interactive login"
-          - "  3. Deploy containers on Pandora with Traefik labels"
-          - "     (auto-routed via traefik-kop → Redis → Traefik)"
+          - "  1. SSH to Jade LXC: ssh jade (from laptop)"
+          - "  2. Run 'claude' for interactive login (OAuth)"
+          - "  3. Run 'opencode' for API key setup"
+          - "  4. Clone remaining repos from Gitea as needed"
