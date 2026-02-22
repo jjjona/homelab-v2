@@ -110,6 +110,7 @@
         - /mnt/data/docker/linkding/data
         - /mnt/data/docker/pocketid/data
         - /mnt/data/docker/tinyauth/data
+        - /mnt/data/docker/forgejo-runner
 
     # --- Pre-seed Servarr config.xml with API keys (first deploy only) ---
 
@@ -216,6 +217,14 @@
           credentials-file: /etc/cloudflared/credentials.json
 
           ingress:
+            - hostname: auth.{{ secrets.domain }}
+              service: http://traefik:81
+            - hostname: login.{{ secrets.domain }}
+              service: http://traefik:81
+            - hostname: knowledge.{{ secrets.domain }}
+              service: http://traefik:81
+            - hostname: journal.{{ secrets.domain }}
+              service: http://traefik:81
             - service: http://traefik:80
         owner: "65532"
         group: "65532"
@@ -241,7 +250,7 @@
 
     - name: Start compose stack
       ansible.builtin.command:
-        cmd: docker compose up -d --remove-orphans
+        cmd: docker compose up -d --remove-orphans --force-recreate
         chdir: "{{ project_dir }}"
       changed_when: true
 
@@ -264,18 +273,18 @@
       ansible.builtin.debug:
         msg: "Gluetun VPN: {{ gluetun_health.stdout }}"
 
-    - name: Verify Traefik dashboard is responding
+    - name: Verify Traefik is responding
       ansible.builtin.uri:
-        url: "http://localhost:8080/api/overview"
-        status_code: [200]
+        url: "http://localhost:80"
+        status_code: [200, 401, 404]
       register: traefik_check
       retries: 3
       delay: 5
       until: traefik_check is not failed
 
-    - name: Show Traefik dashboard status
+    - name: Show Traefik health status
       ansible.builtin.debug:
-        msg: "Traefik dashboard: HTTP {{ traefik_check.status }}"
+        msg: "Traefik health: HTTP {{ traefik_check.status }}"
 
     - name: Check compose status
       ansible.builtin.command:

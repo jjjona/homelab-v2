@@ -5,13 +5,14 @@
 # Prerequisites:
 #   - 03-core-services.yml must have been run (PocketID + Tinyauth containers up)
 #   - PocketID initial setup completed (admin account + passkey registered)
-#   - OIDC clients created in PocketID for Tinyauth, Forgejo, Linkding
+#   - OIDC clients created in PocketID for Tinyauth, Forgejo, Gitea, Linkding
 #   - OIDC client secrets saved to docker/secrets.sops.yml and ansible/secrets/auth.sops.yml
 #
 # What this playbook does:
 #   - Arr suite (Sonarr, Radarr, Prowlarr, Lidarr): set AuthenticationMethod=External
 #   - Bazarr: enable proxy header auth (Remote-User)
 #   - Forgejo: add PocketID as OAuth2 auth source via CLI
+#   - Gitea: add PocketID as OAuth2 auth source via CLI
 #
 # What stays manual:
 #   - PocketID initial setup (passkey registration requires browser)
@@ -135,6 +136,30 @@
       changed_when: true
 
     # ================================================================
+    # GITEA — add PocketID as OAuth2 auth source
+    # ================================================================
+
+    - name: Gitea — check existing auth sources
+      ansible.builtin.command:
+        cmd: docker exec --user 1000 gitea gitea admin auth list
+      register: gitea_auth_list
+      changed_when: false
+
+    - name: Gitea — add PocketID OAuth2 auth source
+      ansible.builtin.command:
+        cmd: >-
+          docker exec --user 1000 gitea gitea admin auth add-oauth
+          --name "PocketID"
+          --provider openidConnect
+          --key "{{ auth_secrets.gitea_oidc_client_id }}"
+          --secret "{{ auth_secrets.gitea_oidc_client_secret }}"
+          --auto-discover-url "https://auth.{{ secrets.domain }}/.well-known/openid-configuration"
+          --scopes "openid email profile groups"
+      when: "'PocketID' not in gitea_auth_list.stdout"
+      no_log: true
+      changed_when: true
+
+    # ================================================================
     # Summary
     # ================================================================
 
@@ -152,6 +177,10 @@
           - "  → Proxy header authentication via Tinyauth"
           - ""
           - "Forgejo:"
+          - "  PocketID OAuth2 auth source added (openidConnect)"
+          - "  → 'Sign in with PocketID' button on login page"
+          - ""
+          - "Gitea:"
           - "  PocketID OAuth2 auth source added (openidConnect)"
           - "  → 'Sign in with PocketID' button on login page"
           - ""

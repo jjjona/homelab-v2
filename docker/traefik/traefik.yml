@@ -7,6 +7,18 @@ entryPoints:
     forwardedHeaders:
       trustedIPs:
         - "172.20.0.0/24"
+    http:
+      middlewares:
+        - force-https-proto@file
+        - tinyauth@docker
+  web-noauth:
+    address: ":81"
+    forwardedHeaders:
+      trustedIPs:
+        - "172.20.0.0/24"
+    http:
+      middlewares:
+        - force-https-proto@file
 
 providers:
   docker:
