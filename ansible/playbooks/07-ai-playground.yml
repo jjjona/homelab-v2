@@ -580,6 +580,38 @@
         group: jade
         mode: "0600"
 
+    # --- SSHFS mount for Pandora workspaces ---
+
+    - name: Create sshfs mount systemd service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/mnt-workspaces.service
+        content: |
+          [Unit]
+          Description=SSHFS mount pandora:/opt/workspaces
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=forking
+          User=jade
+          ExecStart=/usr/bin/sshfs root@pandora:/opt/workspaces /mnt/workspaces -o IdentityFile=/home/jade/.ssh/jade_pandora_ed25519,allow_other,reconnect,ServerAliveInterval=15,StrictHostKeyChecking=no,UserKnownHostsFile=/dev/null
+          ExecStop=/usr/bin/fusermount3 -u /mnt/workspaces
+          Restart=on-failure
+          RestartSec=10
+
+          [Install]
+          WantedBy=multi-user.target
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Enable and start sshfs mount service
+      ansible.builtin.systemd:
+        name: mnt-workspaces.service
+        enabled: true
+        state: started
+        daemon_reload: true
+
     # --- Store SSH public keys as facts for other plays ---
 
     - name: Read jade Pandora public key
