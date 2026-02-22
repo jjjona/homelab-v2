@@ -3,7 +3,7 @@
 # Creates the Jade Platform Foundation with two LXCs and Gitea integration:
 #   - Jade LXC 201 (.160): Bun + Claude Code + OpenCode CLI + git (runs as `jade` user)
 #   - Pandora LXC 202 (.161): Docker Engine + git + traefik-kop (sandbox node)
-#   - Gitea on existing docker-host compose stack (git.jnrm.eu, port 3001)
+#   - Gitea on existing docker-host compose stack (git.jnrm.eu, port 3000)
 #   - SSH-based git access to Gitea (port 2223) for jade user
 #   - MCP servers (jade-knowledge + jade-journal) for both Claude Code and OpenCode
 #   - Persona slash commands via jade-prompts repo
@@ -688,8 +688,7 @@
             "log-opts": {
               "max-size": "10m",
               "max-file": "3"
-            },
-            "insecure-registries": ["192.168.0.159:3000"]
+            }
           }
         owner: root
         group: root
@@ -860,270 +859,11 @@
         name: docker
         state: restarted
 
-# =============================================================
-# Play 5: Docker host — Deploy Forgejo + Gitea + create users
-# =============================================================
-- name: Deploy Forgejo and create users
-  hosts: docker_host
-  gather_facts: false
-  tags: [forgejo]
-
-  vars:
-    project_dir: /mnt/data/docker/core
-    secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../../docker/secrets.sops.yml') | from_yaml }}"
-    ai_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/ai-playground.sops.yml') | from_yaml }}"
-
-  pre_tasks:
-    - name: Wait for SSH connection
-      ansible.builtin.wait_for_connection:
-        timeout: 60
-
-  tasks:
-
-    # --- Create Forgejo data directory ---
-
-    - name: Create Forgejo data directory
-      ansible.builtin.file:
-        path: /mnt/data/docker/forgejo/data
-        state: directory
-        owner: "1000"
-        group: "1000"
-        mode: "0755"
-
-    # --- Copy updated compose + Traefik files ---
-
-    - name: Copy docker-compose.yml
-      ansible.builtin.copy:
-        src: "{{ playbook_dir }}/../../docker/docker-compose.yml"
-        dest: "{{ project_dir }}/docker-compose.yml"
-        owner: root
-        group: root
-        mode: "0644"
-
-    # --- Deploy ---
-
-    - name: Pull latest images
-      ansible.builtin.command:
-        cmd: docker compose pull
-        chdir: "{{ project_dir }}"
-      changed_when: true
-
-    - name: Start compose stack
-      ansible.builtin.command:
-        cmd: docker compose up -d --remove-orphans
-        chdir: "{{ project_dir }}"
-      changed_when: true
-
-    # --- Wait for Forgejo ---
-
-    - name: Wait for Forgejo to be ready
-      ansible.builtin.uri:
-        url: http://127.0.0.1:3000
-        status_code: [200, 302]
-      register: forgejo_ready
-      retries: 12
-      delay: 10
-      until: forgejo_ready is not failed
-
-    - name: Show Forgejo status
-      ansible.builtin.debug:
-        msg: "Forgejo is up (HTTP {{ forgejo_ready.status }})"
-
-    # --- Create admin user ---
-
-    - name: Check if admin user exists
-      ansible.builtin.command:
-        cmd: docker exec --user git forgejo forgejo admin user list
-      register: forgejo_users
-      changed_when: false
-
-    - name: Create Forgejo admin user
-      ansible.builtin.command:
-        cmd: >
-          docker exec --user git forgejo forgejo admin user create
-          --username {{ ai_secrets.forgejo_admin_user }}
-          --password {{ ai_secrets.forgejo_admin_password }}
-          --email {{ ai_secrets.forgejo_admin_email }}
-          --admin
-          --must-change-password=false
-      when: ai_secrets.forgejo_admin_user not in forgejo_users.stdout
-      no_log: true
-
-    # --- Create claude user (Forgejo) ---
-
-    - name: Create Forgejo claude user
-      ansible.builtin.command:
-        cmd: >
-          docker exec --user git forgejo forgejo admin user create
-          --username {{ ai_secrets.forgejo_claude_user }}
-          --password {{ ai_secrets.forgejo_claude_password }}
-          --email {{ ai_secrets.forgejo_claude_email }}
-          --must-change-password=false
-      when: ai_secrets.forgejo_claude_user not in forgejo_users.stdout
-      no_log: true
-
-    # --- Generate access token for Claude (Forgejo) ---
-
-    - name: Check existing Forgejo tokens via API
-      ansible.builtin.uri:
-        url: "http://127.0.0.1:3000/api/v1/users/{{ ai_secrets.forgejo_claude_user }}/tokens"
-        method: GET
-        user: "{{ ai_secrets.forgejo_claude_user }}"
-        password: "{{ ai_secrets.forgejo_claude_password }}"
-        force_basic_auth: true
-        status_code: [200]
-      register: existing_tokens
-      no_log: true
-
-    - name: Delete old claude-code token if present
-      ansible.builtin.uri:
-        url: "http://127.0.0.1:3000/api/v1/users/{{ ai_secrets.forgejo_claude_user }}/tokens/{{ item.id }}"
-        method: DELETE
-        user: "{{ ai_secrets.forgejo_claude_user }}"
-        password: "{{ ai_secrets.forgejo_claude_password }}"
-        force_basic_auth: true
-        status_code: [204]
-      loop: "{{ existing_tokens.json | selectattr('name', 'equalto', 'claude-code') | list }}"
-      loop_control:
-        label: "{{ item.name }}"
-      no_log: true
-
-    - name: Generate fresh Forgejo access token for Claude
-      ansible.builtin.command:
-        cmd: >
-          docker exec --user git forgejo forgejo admin user generate-access-token
-          --username {{ ai_secrets.forgejo_claude_user }}
-          --token-name claude-code
-          --scopes all
-          --raw
-      register: claude_token_result
-      no_log: true
-
-    - name: Store Claude Forgejo token as fact
-      ansible.builtin.set_fact:
-        claude_forgejo_token: "{{ claude_token_result.stdout | trim }}"
-      delegate_to: localhost
-      delegate_facts: true
-      no_log: true
-
-    # --- Configure Docker daemon (insecure-registries) ---
-
-    - name: Configure Docker daemon on docker host
-      ansible.builtin.copy:
-        dest: /etc/docker/daemon.json
-        content: |
-          {
-            "storage-driver": "overlay2",
-            "log-driver": "json-file",
-            "log-opts": {
-              "max-size": "10m",
-              "max-file": "3"
-            },
-            "insecure-registries": ["192.168.0.159:3000"]
-          }
-        owner: root
-        group: root
-        mode: "0644"
-      notify: restart docker
-
-    # --- Authorize Jade's SSH key for Docker host ---
-
-    - name: Add Jade's Docker host SSH key to authorized_keys
-      ansible.posix.authorized_key:
-        user: root
-        key: "{{ hostvars['localhost']['jade_docker_ssh_pubkey'] }}"
-        state: present
-
-    # --- Runner registration ---
-
-    - name: Create runner data directory
-      ansible.builtin.file:
-        path: /mnt/data/docker/forgejo-runner
-        state: directory
-        owner: root
-        group: root
-        mode: "0755"
-
-    - name: Copy runner config.yaml
-      ansible.builtin.copy:
-        src: "{{ playbook_dir }}/../../docker/forgejo-runner/config.yaml"
-        dest: /mnt/data/docker/forgejo-runner/config.yaml
-        owner: root
-        group: root
-        mode: "0644"
-
-    - name: Check if runner is already registered
-      ansible.builtin.stat:
-        path: /mnt/data/docker/forgejo-runner/.runner
-      register: runner_file
-
-    - name: Register Forgejo runner
-      when: not runner_file.stat.exists
-      block:
-
-        - name: Generate runner registration token
-          ansible.builtin.command:
-            cmd: docker exec --user git forgejo forgejo actions generate-runner-token
-          register: runner_token
-
-        - name: Register runner with Forgejo
-          ansible.builtin.command:
-            cmd: >
-              docker compose run --rm forgejo-runner
-              forgejo-runner register --no-interactive
-              --instance http://192.168.0.159:3000
-              --token {{ runner_token.stdout | trim }}
-              --name homelab-runner
-              --labels "docker:docker://node:22-bookworm,ubuntu-latest:docker://ubuntu:22.04"
-            chdir: "{{ project_dir }}"
-
-    - name: Ensure runner is running
-      ansible.builtin.command:
-        cmd: docker compose up -d forgejo-runner
-        chdir: "{{ project_dir }}"
-      changed_when: true
-
-    - name: Wait for runner to connect
-      ansible.builtin.pause:
-        seconds: 10
-
-    - name: Verify runner container is running
-      ansible.builtin.command:
-        cmd: docker inspect --format "{% raw %}{{.State.Status}}{% endraw %}" forgejo-runner
-      register: runner_status
-      changed_when: false
-
-    - name: Show runner status
-      ansible.builtin.debug:
-        msg: "Forgejo runner: {{ runner_status.stdout }}"
-
-    # --- Verify Forgejo via Traefik ---
-
-    - name: Verify Forgejo via Traefik
-      ansible.builtin.uri:
-        url: "http://localhost:80/"
-        headers:
-          Host: "gitarchive.{{ secrets.domain }}"
-        status_code: [200, 302, 401]
-      register: forgejo_traefik_check
-      retries: 3
-      delay: 5
-      until: forgejo_traefik_check is not failed
-
-    - name: Show Forgejo via Traefik result
-      ansible.builtin.debug:
-        msg: "Forgejo via Traefik: HTTP {{ forgejo_traefik_check.status }} (401 = tinyauth protecting, expected)"
-
-  handlers:
-    - name: restart docker
-      ansible.builtin.systemd:
-        name: docker
-        state: restarted
 
 # =============================================================
-# Play 5b: Docker host — Deploy Gitea + create users
+# Play 5: Docker host — Deploy Gitea + create users + authorize SSH
 # =============================================================
-- name: Deploy Gitea and create users
+- name: Deploy Gitea and configure Docker host
   hosts: docker_host
   gather_facts: false
   tags: [gitea]
@@ -1178,7 +918,7 @@
 
     - name: Wait for Gitea to be ready
       ansible.builtin.uri:
-        url: http://127.0.0.1:3001
+        url: http://127.0.0.1:3000
         status_code: [200, 302]
       register: gitea_ready
       retries: 12
@@ -1226,7 +966,7 @@
 
     - name: Check existing Gitea tokens
       ansible.builtin.uri:
-        url: "http://127.0.0.1:3001/api/v1/users/{{ ai_secrets.gitea_jade_user }}/tokens"
+        url: "http://127.0.0.1:3000/api/v1/users/{{ ai_secrets.gitea_jade_user }}/tokens"
         method: GET
         user: "{{ ai_secrets.gitea_jade_user }}"
         password: "{{ ai_secrets.gitea_jade_password }}"
@@ -1237,7 +977,7 @@
 
     - name: Delete old jade-api token if present
       ansible.builtin.uri:
-        url: "http://127.0.0.1:3001/api/v1/users/{{ ai_secrets.gitea_jade_user }}/tokens/{{ item.id }}"
+        url: "http://127.0.0.1:3000/api/v1/users/{{ ai_secrets.gitea_jade_user }}/tokens/{{ item.id }}"
         method: DELETE
         user: "{{ ai_secrets.gitea_jade_user }}"
         password: "{{ ai_secrets.gitea_jade_password }}"
@@ -1268,9 +1008,9 @@
 
     # --- Register Jade's SSH key with Gitea ---
 
-    - name: Remove existing jade-lxc SSH key from Gitea (if any)
+    - name: List existing SSH keys in Gitea
       ansible.builtin.uri:
-        url: "http://127.0.0.1:3001/api/v1/user/keys"
+        url: "http://127.0.0.1:3000/api/v1/user/keys"
         method: GET
         headers:
           Authorization: "token {{ hostvars['localhost']['jade_gitea_token'] }}"
@@ -1280,7 +1020,7 @@
 
     - name: Delete old jade-lxc SSH key
       ansible.builtin.uri:
-        url: "http://127.0.0.1:3001/api/v1/user/keys/{{ item.id }}"
+        url: "http://127.0.0.1:3000/api/v1/user/keys/{{ item.id }}"
         method: DELETE
         headers:
           Authorization: "token {{ hostvars['localhost']['jade_gitea_token'] }}"
@@ -1293,7 +1033,7 @@
 
     - name: Register Jade's SSH key with Gitea
       ansible.builtin.uri:
-        url: "http://127.0.0.1:3001/api/v1/user/keys"
+        url: "http://127.0.0.1:3000/api/v1/user/keys"
         method: POST
         headers:
           Authorization: "token {{ hostvars['localhost']['jade_gitea_token'] }}"
@@ -1309,7 +1049,7 @@
 
     - name: Delete old pandora-lxc SSH key
       ansible.builtin.uri:
-        url: "http://127.0.0.1:3001/api/v1/user/keys/{{ item.id }}"
+        url: "http://127.0.0.1:3000/api/v1/user/keys/{{ item.id }}"
         method: DELETE
         headers:
           Authorization: "token {{ hostvars['localhost']['jade_gitea_token'] }}"
@@ -1322,7 +1062,7 @@
 
     - name: Register Pandora's SSH key with Gitea
       ansible.builtin.uri:
-        url: "http://127.0.0.1:3001/api/v1/user/keys"
+        url: "http://127.0.0.1:3000/api/v1/user/keys"
         method: POST
         headers:
           Authorization: "token {{ hostvars['localhost']['jade_gitea_token'] }}"
@@ -1333,6 +1073,14 @@
           key: "{{ hostvars['localhost']['pandora_gitea_ssh_pubkey'] }}"
         status_code: [201]
       no_log: true
+
+    # --- Authorize Jade's SSH key for Docker host ---
+
+    - name: Add Jade's Docker host SSH key to authorized_keys
+      ansible.posix.authorized_key:
+        user: root
+        key: "{{ hostvars['localhost']['jade_docker_ssh_pubkey'] }}"
+        state: present
 
     # --- Verify Gitea via Traefik ---
 
@@ -1375,7 +1123,7 @@
     - name: Write git credentials file (HTTP backup)
       ansible.builtin.copy:
         dest: /home/jade/.git-credentials
-        content: "http://{{ ai_secrets.gitea_jade_user }}:{{ hostvars['localhost']['jade_gitea_token'] }}@192.168.0.159:3001\n"
+        content: "http://{{ ai_secrets.gitea_jade_user }}:{{ hostvars['localhost']['jade_gitea_token'] }}@192.168.0.159:3000\n"
         owner: jade
         group: jade
         mode: "0600"
@@ -1516,7 +1264,7 @@
     - name: Write git credentials file (HTTP backup)
       ansible.builtin.copy:
         dest: /root/.git-credentials
-        content: "http://{{ ai_secrets.gitea_jade_user }}:{{ hostvars['localhost']['jade_gitea_token'] }}@192.168.0.159:3001\n"
+        content: "http://{{ ai_secrets.gitea_jade_user }}:{{ hostvars['localhost']['jade_gitea_token'] }}@192.168.0.159:3000\n"
         owner: root
         group: root
         mode: "0600"
@@ -1706,10 +1454,7 @@
           - "=== Jade Platform Foundation Deployed ==="
           - "Jade LXC 201: 192.168.0.160 (Bun + Claude Code + OpenCode as 'jade' user)"
           - "Pandora LXC 202: 192.168.0.161 (Docker + traefik-kop + workspaces)"
-          - "Forgejo: http://192.168.0.159:3000 (gitarchive.jnrm.eu)"
-          - "Gitea: http://192.168.0.159:3001 (git.jnrm.eu, SSH port 2223)"
-          - "Forgejo Runner: homelab-runner (Actions CI/CD)"
-          - "Container Registry: 192.168.0.159:3000/v2/"
+          - "Gitea: http://192.168.0.159:3000 (git.jnrm.eu, SSH port 2223)"
           - "SSH: jade → pandora (.161), jade → live (.159), jade → gitea (SSH)"
           - "MCP: jade-knowledge + jade-journal on both Claude Code and OpenCode"
           - ""
