@@ -290,8 +290,15 @@
           - python3
           - sudo
           - unzip
+          - sshfs
         state: present
         update_cache: true
+
+    - name: Enable user_allow_other in fuse.conf
+      ansible.builtin.lineinfile:
+        path: /etc/fuse.conf
+        regexp: "^#?user_allow_other"
+        line: "user_allow_other"
 
     # --- Create jade user (Claude Code / OpenCode can't run as root) ---
 
