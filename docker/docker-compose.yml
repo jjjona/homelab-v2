@@ -435,7 +435,7 @@ services:
     volumes:
       - /mnt/data/docker/ephemera/data:/app/data
       - /mnt/data/docker/ephemera/downloads:/app/downloads
-      - /mnt/data/docker/booklore/bookdrop:/app/ingest
+      - /mnt/nas/books:/app/ingest
     restart: unless-stopped
     network_mode: "service:gluetun"
     depends_on:
