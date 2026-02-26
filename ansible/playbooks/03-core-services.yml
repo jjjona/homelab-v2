@@ -120,6 +120,28 @@
         - /mnt/data/docker/booklore/bookdrop
         - /mnt/data/docker/booklore-db/data
 
+    - name: Fix ownership for Ephemera directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "1000"
+        group: "100"
+        recurse: true
+      loop:
+        - /mnt/data/docker/ephemera/data
+        - /mnt/data/docker/ephemera/downloads
+
+    - name: Fix ownership for Booklore directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "1000"
+        group: "1000"
+        recurse: true
+      loop:
+        - /mnt/data/docker/booklore/data
+        - /mnt/data/docker/booklore/bookdrop
+
     # --- Pre-seed Servarr config.xml with API keys (first deploy only) ---
 
     - name: Pre-seed config.xml for Servarr apps

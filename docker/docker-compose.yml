@@ -422,7 +422,8 @@ services:
         condition: service_healthy
 
   ephemera:
-    image: ghcr.io/orwellianepilogue/ephemera:latest
+    image: ephemera:latest
+    pull_policy: never
     container_name: ephemera
     environment:
       - AA_BASE_URL=${AA_BASE_URL}
@@ -465,8 +466,8 @@ services:
       - APP_GROUP_ID=0
       - TZ=Europe/Brussels
       - DATABASE_URL=jdbc:mariadb://booklore-db:3306/booklore
-      - DB_USER=booklore
-      - DB_PASSWORD=${BOOKLORE_DB_PASSWORD}
+      - DATABASE_USERNAME=booklore
+      - DATABASE_PASSWORD=${BOOKLORE_DB_PASSWORD}
     volumes:
       - /mnt/data/docker/booklore/data:/app/data
       - /mnt/nas/books:/books
