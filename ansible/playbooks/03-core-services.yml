@@ -10,9 +10,12 @@
 #   - Sonarr, Radarr, Prowlarr, Lidarr (arr suite)
 #   - Jellyseerr (media requests)
 #   - Autobrr (automation, behind VPN)
+#   - Ephemera (book downloader, behind VPN)
+#   - FlareSolverr (Cloudflare bypass, behind VPN)
 #   - Bazarr (subtitle management)
 #   - Linkding (bookmark manager)
-#   - Gluetun (VPN tunnel for Prowlarr + Autobrr)
+#   - Booklore + MariaDB (book library with BookDrop auto-import)
+#   - Gluetun (VPN tunnel for Prowlarr + Autobrr + Ephemera + FlareSolverr)
 #
 # Decrypts SOPS secrets, copies files, templates config, runs compose up.
 # Re-runnable: each run copies latest files and recreates containers.
@@ -111,6 +114,11 @@
         - /mnt/data/docker/pocketid/data
         - /mnt/data/docker/tinyauth/data
         - /mnt/data/docker/forgejo-runner
+        - /mnt/data/docker/ephemera/data
+        - /mnt/data/docker/ephemera/downloads
+        - /mnt/data/docker/booklore/data
+        - /mnt/data/docker/booklore/bookdrop
+        - /mnt/data/docker/booklore-db/data
 
     # --- Pre-seed Servarr config.xml with API keys (first deploy only) ---
 
@@ -197,6 +205,10 @@
           LINKDING_ENABLE_OIDC=True
           LINKDING_OIDC_CLIENT_ID={{ secrets.linkding_oidc_client_id }}
           LINKDING_OIDC_CLIENT_SECRET={{ secrets.linkding_oidc_client_secret }}
+          AA_BASE_URL={{ secrets.aa_base_url }}
+          LG_BASE_URL={{ secrets.lg_base_url }}
+          BOOKLORE_DB_ROOT_PASSWORD={{ secrets.booklore_db_root_password }}
+          BOOKLORE_DB_PASSWORD={{ secrets.booklore_db_password }}
         owner: root
         group: root
         mode: "0600"
@@ -394,6 +406,28 @@
       retries: 3
       delay: 5
       until: autobrr_check is not failed
+
+    - name: Verify Ephemera is responding
+      ansible.builtin.uri:
+        url: "http://localhost:80/"
+        headers:
+          Host: "ephemera.{{ secrets.domain }}"
+        status_code: [200, 302, 401]
+      register: ephemera_check
+      retries: 3
+      delay: 5
+      until: ephemera_check is not failed
+
+    - name: Verify Booklore is responding
+      ansible.builtin.uri:
+        url: "http://localhost:80/"
+        headers:
+          Host: "books.{{ secrets.domain }}"
+        status_code: [200, 302, 401]
+      register: booklore_check
+      retries: 3
+      delay: 5
+      until: booklore_check is not failed
 
     - name: Verify Bazarr is responding
       ansible.builtin.uri:

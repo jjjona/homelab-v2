@@ -361,6 +361,7 @@ services:
     ports:
       - "127.0.0.1:9696:9696"   # Prowlarr
       - "127.0.0.1:7474:7474"   # Autobrr
+      - "127.0.0.1:8286:8286"   # Ephemera
     environment:
       - VPN_SERVICE_PROVIDER=custom
       - VPN_TYPE=openvpn
@@ -383,6 +384,9 @@ services:
       - "traefik.http.routers.autobrr.rule=Host(`autobrr.${DOMAIN}`)"
       - "traefik.http.routers.autobrr.service=autobrr"
       - "traefik.http.services.autobrr.loadbalancer.server.port=7474"
+      - "traefik.http.routers.ephemera.rule=Host(`ephemera.${DOMAIN}`)"
+      - "traefik.http.routers.ephemera.service=ephemera"
+      - "traefik.http.services.ephemera.loadbalancer.server.port=8286"
     networks:
       web:
         ipv4_address: 172.20.0.20
@@ -416,6 +420,83 @@ services:
     depends_on:
       gluetun:
         condition: service_healthy
+
+  ephemera:
+    image: ghcr.io/orwellianepilogue/ephemera:latest
+    container_name: ephemera
+    environment:
+      - AA_BASE_URL=${AA_BASE_URL}
+      - LG_BASE_URL=${LG_BASE_URL}
+      - FLARESOLVERR_URL=http://127.0.0.1:8191
+      - PUID=1000
+      - PGID=100
+      - TZ=Europe/Brussels
+    volumes:
+      - /mnt/data/docker/ephemera/data:/app/data
+      - /mnt/data/docker/ephemera/downloads:/app/downloads
+      - /mnt/data/docker/booklore/bookdrop:/app/ingest
+    restart: unless-stopped
+    network_mode: "service:gluetun"
+    depends_on:
+      gluetun:
+        condition: service_healthy
+
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    environment:
+      - LOG_LEVEL=info
+      - LOG_HTML=false
+      - CAPTCHA_SOLVER=none
+      - TZ=Europe/Brussels
+    restart: unless-stopped
+    network_mode: "service:gluetun"
+    depends_on:
+      gluetun:
+        condition: service_healthy
+
+  # --- Books (Booklore + MariaDB) ---
+
+  booklore:
+    image: ghcr.io/booklore-app/booklore:latest
+    container_name: booklore
+    environment:
+      - APP_USER_ID=0
+      - APP_GROUP_ID=0
+      - TZ=Europe/Brussels
+      - DATABASE_URL=jdbc:mariadb://booklore-db:3306/booklore
+      - DB_USER=booklore
+      - DB_PASSWORD=${BOOKLORE_DB_PASSWORD}
+    volumes:
+      - /mnt/data/docker/booklore/data:/app/data
+      - /mnt/nas/books:/books
+      - /mnt/data/docker/booklore/bookdrop:/bookdrop
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.booklore.rule=Host(`books.${DOMAIN}`)"
+      - "traefik.http.services.booklore.loadbalancer.server.port=6060"
+    networks:
+      web:
+        ipv4_address: 172.20.0.18
+    depends_on:
+      - booklore-db
+
+  booklore-db:
+    image: mariadb:11.4
+    container_name: booklore-db
+    environment:
+      - MYSQL_ROOT_PASSWORD=${BOOKLORE_DB_ROOT_PASSWORD}
+      - MYSQL_DATABASE=booklore
+      - MYSQL_USER=booklore
+      - MYSQL_PASSWORD=${BOOKLORE_DB_PASSWORD}
+      - TZ=Europe/Brussels
+    volumes:
+      - /mnt/data/docker/booklore-db/data:/var/lib/mysql
+    restart: unless-stopped
+    networks:
+      web:
+        ipv4_address: 172.20.0.19
 
 networks:
   web:
