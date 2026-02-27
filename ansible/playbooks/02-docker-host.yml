@@ -37,6 +37,7 @@
       - photos
       - backups
       - share
+      - books-to-summarize
     ssh_pubkey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFG9NoQSuVYiBD5fib0bN43e2UWwH5iEeDy99cCsHrHC"
 
   tasks:
