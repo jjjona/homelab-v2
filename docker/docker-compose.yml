@@ -362,6 +362,7 @@ services:
       - "127.0.0.1:9696:9696"   # Prowlarr
       - "127.0.0.1:7474:7474"   # Autobrr
       - "127.0.0.1:8286:8286"   # Ephemera
+      - "127.0.0.1:8287:8287"   # Ephemera (summarize)
     environment:
       - VPN_SERVICE_PROVIDER=custom
       - VPN_TYPE=openvpn
@@ -387,6 +388,9 @@ services:
       - "traefik.http.routers.ephemera.rule=Host(`ephemera.${DOMAIN}`)"
       - "traefik.http.routers.ephemera.service=ephemera"
       - "traefik.http.services.ephemera.loadbalancer.server.port=8286"
+      - "traefik.http.routers.summarize.rule=Host(`summarize.${DOMAIN}`)"
+      - "traefik.http.routers.summarize.service=summarize"
+      - "traefik.http.services.summarize.loadbalancer.server.port=8287"
     networks:
       web:
         ipv4_address: 172.20.0.20
@@ -436,6 +440,28 @@ services:
       - /mnt/data/docker/ephemera/data:/app/data
       - /mnt/data/docker/ephemera/downloads:/app/downloads
       - /mnt/nas/books:/app/ingest
+    restart: unless-stopped
+    network_mode: "service:gluetun"
+    depends_on:
+      gluetun:
+        condition: service_healthy
+
+  ephemera-summarize:
+    image: ephemera:latest
+    pull_policy: never
+    container_name: ephemera-summarize
+    environment:
+      - AA_BASE_URL=${AA_BASE_URL}
+      - LG_BASE_URL=${LG_BASE_URL}
+      - FLARESOLVERR_URL=http://127.0.0.1:8191
+      - PORT=8287
+      - PUID=1000
+      - PGID=100
+      - TZ=Europe/Brussels
+    volumes:
+      - /mnt/data/docker/ephemera-summarize/data:/app/data
+      - /mnt/data/docker/ephemera-summarize/downloads:/app/downloads
+      - /mnt/nas/books-to-summarize:/app/ingest
     restart: unless-stopped
     network_mode: "service:gluetun"
     depends_on:

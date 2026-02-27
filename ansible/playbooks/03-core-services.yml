@@ -127,6 +127,8 @@
         - /mnt/data/docker/forgejo-runner
         - /mnt/data/docker/ephemera/data
         - /mnt/data/docker/ephemera/downloads
+        - /mnt/data/docker/ephemera-summarize/data
+        - /mnt/data/docker/ephemera-summarize/downloads
         - /mnt/data/docker/booklore/data
         - /mnt/data/docker/booklore/bookdrop
         - /mnt/data/docker/booklore-db/data
@@ -141,6 +143,8 @@
       loop:
         - /mnt/data/docker/ephemera/data
         - /mnt/data/docker/ephemera/downloads
+        - /mnt/data/docker/ephemera-summarize/data
+        - /mnt/data/docker/ephemera-summarize/downloads
 
     - name: Fix ownership for Booklore directories
       ansible.builtin.file:
