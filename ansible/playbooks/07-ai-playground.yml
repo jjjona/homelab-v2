@@ -63,6 +63,9 @@
     ct_template: debian-12-standard_12.12-1_amd64.tar.zst
     ct_template_storage: local
     ct_fuse: true
+    ct_mounts:
+      - mp0: /mnt/nas/books-to-summarize,mp=/mnt/to-summarize
+      - mp1: /mnt/nas/books,mp=/mnt/books
     ssh_pubkey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFG9NoQSuVYiBD5fib0bN43e2UWwH5iEeDy99cCsHrHC"
 
   tasks:
@@ -126,6 +129,13 @@
               lxc.cgroup2.devices.allow: c 10:229 rwm
             marker: "# {mark} ANSIBLE MANAGED - FUSE"
           when: ct_fuse | default(false)
+
+        - name: Add NAS bind mounts for LXC {{ ct_id }}
+          ansible.builtin.command: >
+            pct set {{ ct_id }}
+            -mp0 {{ ct_mounts[0].mp0 }}
+            -mp1 {{ ct_mounts[1].mp1 }}
+          when: ct_mounts is defined
 
         - name: Start LXC {{ ct_id }}
           ansible.builtin.command: pct start {{ ct_id }}
@@ -242,6 +252,13 @@
               lxc.cgroup2.devices.allow: c 10:229 rwm
             marker: "# {mark} ANSIBLE MANAGED - FUSE"
           when: ct_fuse | default(false)
+
+        - name: Add NAS bind mounts for LXC {{ ct_id }}
+          ansible.builtin.command: >
+            pct set {{ ct_id }}
+            -mp0 {{ ct_mounts[0].mp0 }}
+            -mp1 {{ ct_mounts[1].mp1 }}
+          when: ct_mounts is defined
 
         - name: Start LXC {{ ct_id }}
           ansible.builtin.command: pct start {{ ct_id }}

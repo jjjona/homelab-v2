@@ -51,13 +51,16 @@
         - /mnt/nas/media/movies
         - /mnt/nas/media/music
 
-    - name: Ensure books directory is writable by LXC uid 1000
+    - name: Ensure NAS book directories are writable by LXC uid 1000
       ansible.builtin.file:
-        path: /mnt/nas/books
+        path: "{{ item }}"
         state: directory
         owner: "101000"
         group: "100100"
         mode: "0775"
+      loop:
+        - /mnt/nas/books
+        - /mnt/nas/books-to-summarize
 
 # =============================================================
 # Play 2: Docker host — deploy compose stack
