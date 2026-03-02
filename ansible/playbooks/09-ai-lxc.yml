@@ -46,7 +46,7 @@
   tags: [gpu, nvidia]
 
   vars:
-    nvidia_driver_version: "570.124.04"
+    nvidia_driver_version: "580.126.18"
     nvidia_driver_url: "https://us.download.nvidia.com/XFree86/Linux-x86_64/{{ nvidia_driver_version }}/NVIDIA-Linux-x86_64-{{ nvidia_driver_version }}.run"
     nvidia_driver_file: "/tmp/NVIDIA-Linux-x86_64-{{ nvidia_driver_version }}.run"
 
@@ -149,6 +149,10 @@
         - nvidia-modeset
       changed_when: false
 
+    - name: Create NVIDIA device nodes (nvidia-smi initializes them)
+      ansible.builtin.command: nvidia-smi
+      changed_when: false
+
     - name: Persist NVIDIA modules across reboots
       ansible.builtin.copy:
         dest: /etc/modules-load.d/nvidia.conf
@@ -171,7 +175,6 @@
           KERNEL=="nvidiactl", OWNER="100000", GROUP="100000", MODE="0660"
           KERNEL=="nvidia-uvm", OWNER="100000", GROUP="100000", MODE="0660"
           KERNEL=="nvidia-uvm-tools", OWNER="100000", GROUP="100000", MODE="0660"
-          KERNEL=="nvidia-modeset", OWNER="100000", GROUP="100000", MODE="0660"
         owner: root
         group: root
         mode: "0644"
@@ -196,7 +199,6 @@
         - /dev/nvidiactl
         - /dev/nvidia-uvm
         - /dev/nvidia-uvm-tools
-        - /dev/nvidia-modeset
       ignore_errors: true
 
     # --- Verify + capture device info ---
@@ -211,12 +213,12 @@
         var: nvidia_smi.stdout_lines
 
     - name: Get nvidia device major number
-      ansible.builtin.shell: stat -c '%t' /dev/nvidia0 | xargs printf '%d\n'
+      ansible.builtin.shell: awk '$2 == "nvidia" {print $1}' /proc/devices
       register: nvidia_major
       changed_when: false
 
     - name: Get nvidia-uvm device major number
-      ansible.builtin.shell: stat -c '%t' /dev/nvidia-uvm | xargs printf '%d\n'
+      ansible.builtin.shell: awk '$2 == "nvidia-uvm" {print $1}' /proc/devices
       register: nvidia_uvm_major
       changed_when: false
 
@@ -316,7 +318,6 @@
               lxc.mount.entry: /dev/nvidiactl dev/nvidiactl none bind,optional,create=file
               lxc.mount.entry: /dev/nvidia-uvm dev/nvidia-uvm none bind,optional,create=file
               lxc.mount.entry: /dev/nvidia-uvm-tools dev/nvidia-uvm-tools none bind,optional,create=file
-              lxc.mount.entry: /dev/nvidia-modeset dev/nvidia-modeset none bind,optional,create=file
 
         - name: Start LXC {{ ct_id }}
           ansible.builtin.command: pct start {{ ct_id }}
@@ -360,7 +361,7 @@
   tags: [provision, docker, ai]
 
   vars:
-    nvidia_driver_version: "570.124.04"
+    nvidia_driver_version: "580.126.18"
     nvidia_driver_url: "https://us.download.nvidia.com/XFree86/Linux-x86_64/{{ nvidia_driver_version }}/NVIDIA-Linux-x86_64-{{ nvidia_driver_version }}.run"
     nvidia_driver_file: "/tmp/NVIDIA-Linux-x86_64-{{ nvidia_driver_version }}.run"
     ai_stack_dir: /opt/ai-stack
