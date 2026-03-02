@@ -386,9 +386,11 @@ services:
       - "traefik.http.routers.autobrr.service=autobrr"
       - "traefik.http.services.autobrr.loadbalancer.server.port=7474"
       - "traefik.http.routers.ephemera.rule=Host(`ephemera.${DOMAIN}`)"
+      - "traefik.http.routers.ephemera.entrypoints=web-noauth"
       - "traefik.http.routers.ephemera.service=ephemera"
       - "traefik.http.services.ephemera.loadbalancer.server.port=8286"
       - "traefik.http.routers.summarize.rule=Host(`summarize.${DOMAIN}`)"
+      - "traefik.http.routers.summarize.entrypoints=web-noauth"
       - "traefik.http.routers.summarize.service=summarize"
       - "traefik.http.services.summarize.loadbalancer.server.port=8287"
     networks:

@@ -274,6 +274,10 @@
               service: http://traefik:81
             - hostname: journal.{{ secrets.domain }}
               service: http://traefik:81
+            - hostname: ephemera.{{ secrets.domain }}
+              service: http://traefik:81
+            - hostname: summarize.{{ secrets.domain }}
+              service: http://traefik:81
             - service: http://traefik:80
         owner: "65532"
         group: "65532"

@@ -52,10 +52,14 @@
           #!/bin/bash
           # Sync completed downloads from seedbox to NAS
           # Runs via cron every 5 minutes
+          # Only syncs movies/ and tv/ category subfolders (not ratio-building torrents)
 
           LOCKFILE=/tmp/seedbox-sync.lock
           LOGFILE={{ sync_log }}
           SSH_KEY=/root/.ssh/seedbox_ed25519
+          REMOTE={{ seedbox.seedbox_user }}@{{ seedbox.seedbox_host }}
+          REMOTE_BASE={{ seedbox.seedbox_remote_path }}
+          LOCAL_BASE=/mnt/nas/media/downloads/complete
 
           # Prevent overlapping runs
           exec 200>"$LOCKFILE"
@@ -63,11 +67,18 @@
 
           echo "$(date): Starting sync" >> "$LOGFILE"
 
+          # Sync movies
           rsync -avz --ignore-existing --chown=100000:100000 \
-            --exclude='freeleech/' \
             -e "ssh -i $SSH_KEY -p {{ seedbox.seedbox_port }}" \
-            {{ seedbox.seedbox_user }}@{{ seedbox.seedbox_host }}:{{ seedbox.seedbox_remote_path }}/ \
-            /mnt/nas/media/downloads/complete/ \
+            "${REMOTE}:${REMOTE_BASE}/movies/" \
+            "${LOCAL_BASE}/movies/" \
+            >> "$LOGFILE" 2>&1
+
+          # Sync TV
+          rsync -avz --ignore-existing --chown=100000:100000 \
+            -e "ssh -i $SSH_KEY -p {{ seedbox.seedbox_port }}" \
+            "${REMOTE}:${REMOTE_BASE}/tv/" \
+            "${LOCAL_BASE}/tv/" \
             >> "$LOGFILE" 2>&1
 
           echo "$(date): Sync complete" >> "$LOGFILE"

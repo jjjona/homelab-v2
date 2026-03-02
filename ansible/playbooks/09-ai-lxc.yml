@@ -1,0 +1,762 @@
+---
+# 09-ai-lxc.yml
+# Sets up NVIDIA GPU on Proxmox host and creates an AI LXC with GPU passthrough:
+#   - Play 1: Proxmox host — install NVIDIA driver with DKMS, blacklist nouveau
+#   - Play 2: Proxmox host — create AI LXC 203 (.163) with NVIDIA device bind mounts
+#   - Play 3: AI LXC — install Docker + NVIDIA userspace driver + NVIDIA Container Toolkit
+#             + deploy Ollama + Speaches (faster-whisper) + traefik-kop compose stack
+#
+# LXC GPU bind-mount passthrough allows multiple consumers to share the RTX 4070 Ti
+# simultaneously with near-native performance (no VFIO exclusive lock).
+#
+# Run with --tags destroy to tear down the AI LXC first:
+#   ansible-playbook playbooks/09-ai-lxc.yml --tags destroy
+#
+# First run requires a reboot after nouveau blacklist + NVIDIA install.
+# The playbook will detect this and prompt.
+#
+# Safe to re-run: LXC creation skips if already running, driver install skips if
+# nvidia-smi already works.
+
+# =============================================================
+# Play 0: Destroy AI LXC (only with --tags destroy)
+# =============================================================
+- name: Destroy AI LXC
+  hosts: proxmox
+  gather_facts: false
+  tags: [destroy, never]
+
+  tasks:
+
+    - name: Stop and destroy LXC 203 (ai)
+      ansible.builtin.shell: pct stop 203 && pct destroy 203
+      ignore_errors: true
+      changed_when: true
+
+    - name: Show destruction complete
+      ansible.builtin.debug:
+        msg: "AI LXC 203 destroyed. Re-run without --tags destroy to recreate."
+
+# =============================================================
+# Play 1: Proxmox host — install NVIDIA driver
+# =============================================================
+- name: Install NVIDIA driver on Proxmox host
+  hosts: proxmox
+  gather_facts: true
+  tags: [gpu, nvidia]
+
+  vars:
+    nvidia_driver_version: "570.124.04"
+    nvidia_driver_url: "https://us.download.nvidia.com/XFree86/Linux-x86_64/{{ nvidia_driver_version }}/NVIDIA-Linux-x86_64-{{ nvidia_driver_version }}.run"
+    nvidia_driver_file: "/tmp/NVIDIA-Linux-x86_64-{{ nvidia_driver_version }}.run"
+
+  tasks:
+
+    # --- Blacklist nouveau ---
+
+    - name: Blacklist nouveau driver
+      ansible.builtin.copy:
+        dest: /etc/modprobe.d/blacklist-nouveau.conf
+        content: |
+          blacklist nouveau
+          options nouveau modeset=0
+        owner: root
+        group: root
+        mode: "0644"
+      register: nouveau_blacklisted
+
+    - name: Regenerate initramfs after nouveau blacklist
+      ansible.builtin.command: update-initramfs -u
+      when: nouveau_blacklisted.changed
+
+    - name: Check if nouveau is currently loaded
+      ansible.builtin.shell: lsmod | grep -q nouveau
+      register: nouveau_loaded
+      ignore_errors: true
+      changed_when: false
+
+    - name: Warn if reboot needed for nouveau blacklist
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: nouveau is still loaded. A reboot is required before NVIDIA
+          driver can be installed. Run 'reboot' on the Proxmox host, then re-run
+          this playbook.
+      when: nouveau_loaded.rc == 0
+
+    - name: Fail if nouveau still loaded (reboot required)
+      ansible.builtin.fail:
+        msg: "Reboot required to unload nouveau. Reboot the host and re-run this playbook."
+      when: nouveau_loaded.rc == 0 and nouveau_blacklisted.changed
+
+    # --- Install kernel headers + build tools ---
+
+    - name: Install NVIDIA driver build dependencies
+      ansible.builtin.apt:
+        name:
+          - pve-headers-{{ ansible_kernel }}
+          - build-essential
+          - dkms
+          - wget
+        state: present
+        update_cache: true
+
+    # --- Check if NVIDIA driver already installed ---
+
+    - name: Check if nvidia-smi works
+      ansible.builtin.command: nvidia-smi
+      register: nvidia_smi_check
+      ignore_errors: true
+      changed_when: false
+
+    - name: Skip driver install if nvidia-smi works
+      ansible.builtin.debug:
+        msg: "NVIDIA driver already installed (nvidia-smi works), skipping install"
+      when: nvidia_smi_check.rc == 0
+
+    # --- Download and install NVIDIA driver ---
+
+    - name: Install NVIDIA driver
+      when: nvidia_smi_check.rc != 0
+      block:
+
+        - name: Download NVIDIA driver
+          ansible.builtin.get_url:
+            url: "{{ nvidia_driver_url }}"
+            dest: "{{ nvidia_driver_file }}"
+            mode: "0755"
+
+        - name: Install NVIDIA driver with DKMS
+          ansible.builtin.command: >
+            {{ nvidia_driver_file }}
+            --dkms
+            --no-questions
+            --ui=none
+            --disable-nouveau
+          register: nvidia_install
+          changed_when: true
+
+        - name: Show NVIDIA install output
+          ansible.builtin.debug:
+            var: nvidia_install.stdout_lines
+
+    # --- Ensure NVIDIA modules are loaded ---
+
+    - name: Load NVIDIA kernel modules
+      ansible.builtin.command: modprobe {{ item }}
+      loop:
+        - nvidia
+        - nvidia-uvm
+        - nvidia-modeset
+      changed_when: false
+
+    - name: Persist NVIDIA modules across reboots
+      ansible.builtin.copy:
+        dest: /etc/modules-load.d/nvidia.conf
+        content: |
+          nvidia
+          nvidia-uvm
+          nvidia-modeset
+        owner: root
+        group: root
+        mode: "0644"
+
+    # --- udev rules for LXC GPU access ---
+
+    - name: Create udev rule for NVIDIA device permissions (unprivileged LXC)
+      ansible.builtin.copy:
+        dest: /etc/udev/rules.d/99-nvidia-lxc.rules
+        content: |
+          # Allow unprivileged LXC containers to access NVIDIA devices
+          KERNEL=="nvidia[0-9]*", OWNER="100000", GROUP="100000", MODE="0660"
+          KERNEL=="nvidiactl", OWNER="100000", GROUP="100000", MODE="0660"
+          KERNEL=="nvidia-uvm", OWNER="100000", GROUP="100000", MODE="0660"
+          KERNEL=="nvidia-uvm-tools", OWNER="100000", GROUP="100000", MODE="0660"
+          KERNEL=="nvidia-modeset", OWNER="100000", GROUP="100000", MODE="0660"
+        owner: root
+        group: root
+        mode: "0644"
+      register: udev_rules
+
+    - name: Reload udev rules
+      ansible.builtin.command: udevadm control --reload-rules
+      when: udev_rules.changed
+
+    - name: Trigger udev rules
+      ansible.builtin.command: udevadm trigger
+      when: udev_rules.changed
+
+    - name: Set NVIDIA device permissions now (in case udev hasn't applied yet)
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: "100000"
+        group: "100000"
+        mode: "0660"
+      loop:
+        - /dev/nvidia0
+        - /dev/nvidiactl
+        - /dev/nvidia-uvm
+        - /dev/nvidia-uvm-tools
+        - /dev/nvidia-modeset
+      ignore_errors: true
+
+    # --- Verify + capture device info ---
+
+    - name: Verify nvidia-smi
+      ansible.builtin.command: nvidia-smi
+      register: nvidia_smi
+      changed_when: false
+
+    - name: Show nvidia-smi output
+      ansible.builtin.debug:
+        var: nvidia_smi.stdout_lines
+
+    - name: Get nvidia device major number
+      ansible.builtin.shell: stat -c '%t' /dev/nvidia0 | xargs printf '%d\n'
+      register: nvidia_major
+      changed_when: false
+
+    - name: Get nvidia-uvm device major number
+      ansible.builtin.shell: stat -c '%t' /dev/nvidia-uvm | xargs printf '%d\n'
+      register: nvidia_uvm_major
+      changed_when: false
+
+    - name: Store NVIDIA device major numbers as facts
+      ansible.builtin.set_fact:
+        nvidia_device_major: "{{ nvidia_major.stdout | trim }}"
+        nvidia_uvm_major: "{{ nvidia_uvm_major.stdout | trim }}"
+      delegate_to: localhost
+      delegate_facts: true
+
+    - name: Show captured device major numbers
+      ansible.builtin.debug:
+        msg: "nvidia major: {{ nvidia_major.stdout | trim }}, nvidia-uvm major: {{ nvidia_uvm_major.stdout | trim }}"
+
+# =============================================================
+# Play 2: Proxmox host — Create AI LXC 203
+# =============================================================
+- name: Create AI LXC
+  hosts: proxmox
+  gather_facts: false
+  tags: [create, lxc]
+
+  vars:
+    ct_id: 203
+    ct_hostname: ai
+    ct_ip: 192.168.0.163
+    ct_gw: 192.168.0.1
+    ct_memory: 8192
+    ct_swap: 2048
+    ct_cores: 4
+    ct_rootfs_size: 100
+    ct_template: debian-12-standard_12.12-1_amd64.tar.zst
+    ct_template_storage: local
+    ssh_pubkey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFG9NoQSuVYiBD5fib0bN43e2UWwH5iEeDy99cCsHrHC"
+
+  tasks:
+
+    - name: Check if LXC {{ ct_id }} exists
+      ansible.builtin.command: pct status {{ ct_id }}
+      register: ct_check
+      ignore_errors: true
+      changed_when: false
+
+    - name: Skip if LXC {{ ct_id }} is already running
+      ansible.builtin.debug:
+        msg: "LXC {{ ct_id }} already exists ({{ ct_check.stdout | default('') }}), skipping creation"
+      when: ct_check.rc == 0
+
+    - name: Create LXC {{ ct_id }}
+      when: ct_check.rc != 0
+      block:
+
+        - name: Update container template index
+          ansible.builtin.command: pveam update
+          changed_when: false
+
+        - name: Download Debian CT template
+          ansible.builtin.command: >
+            pveam download {{ ct_template_storage }} {{ ct_template }}
+          register: template_download
+          changed_when: "'already exists' not in template_download.stdout"
+          failed_when:
+            - template_download.rc != 0
+            - "'already exists' not in template_download.stderr"
+
+        - name: Write SSH public key to temp file
+          ansible.builtin.copy:
+            dest: /tmp/ct-ssh-pubkey.pub
+            content: "{{ ssh_pubkey }}\n"
+            mode: "0600"
+
+        - name: Create LXC {{ ct_id }}
+          ansible.builtin.command: >
+            pct create {{ ct_id }}
+            {{ ct_template_storage }}:vztmpl/{{ ct_template }}
+            --hostname {{ ct_hostname }}
+            --unprivileged 1
+            --features nesting=1,keyctl=1
+            --rootfs local-lvm:{{ ct_rootfs_size }}
+            --memory {{ ct_memory }}
+            --swap {{ ct_swap }}
+            --cores {{ ct_cores }}
+            --net0 name=eth0,bridge=vmbr0,ip={{ ct_ip }}/24,gw={{ ct_gw }},firewall=0
+            --nameserver 1.1.1.1
+            --onboot 1
+            --start 0
+            --ssh-public-keys /tmp/ct-ssh-pubkey.pub
+
+        - name: Add NVIDIA GPU passthrough to LXC config
+          ansible.builtin.blockinfile:
+            path: "/etc/pve/lxc/{{ ct_id }}.conf"
+            marker: "# {mark} NVIDIA GPU PASSTHROUGH"
+            block: |
+              lxc.cgroup2.devices.allow: c {{ hostvars['localhost']['nvidia_device_major'] }}:* rwm
+              lxc.cgroup2.devices.allow: c {{ hostvars['localhost']['nvidia_uvm_major'] }}:* rwm
+              lxc.mount.entry: /dev/nvidia0 dev/nvidia0 none bind,optional,create=file
+              lxc.mount.entry: /dev/nvidiactl dev/nvidiactl none bind,optional,create=file
+              lxc.mount.entry: /dev/nvidia-uvm dev/nvidia-uvm none bind,optional,create=file
+              lxc.mount.entry: /dev/nvidia-uvm-tools dev/nvidia-uvm-tools none bind,optional,create=file
+              lxc.mount.entry: /dev/nvidia-modeset dev/nvidia-modeset none bind,optional,create=file
+
+        - name: Start LXC {{ ct_id }}
+          ansible.builtin.command: pct start {{ ct_id }}
+
+        - name: Wait for LXC systemd to be ready
+          ansible.builtin.command: pct exec {{ ct_id }} -- systemctl is-system-running --wait
+          register: systemd_ready
+          retries: 12
+          delay: 5
+          until: systemd_ready.rc == 0 or (systemd_ready.stdout is defined and 'running' in systemd_ready.stdout)
+          changed_when: false
+
+        - name: Remove temp SSH key file
+          ansible.builtin.file:
+            path: /tmp/ct-ssh-pubkey.pub
+            state: absent
+
+    - name: Ensure LXC {{ ct_id }} is started
+      ansible.builtin.command: pct start {{ ct_id }}
+      register: start_result
+      failed_when:
+        - start_result.rc != 0
+        - "'already running' not in start_result.stderr"
+      changed_when: start_result.rc == 0
+
+    - name: Verify LXC {{ ct_id }} status
+      ansible.builtin.command: pct status {{ ct_id }}
+      register: ct_status
+      changed_when: false
+
+    - name: Show LXC {{ ct_id }} status
+      ansible.builtin.debug:
+        var: ct_status.stdout
+
+# =============================================================
+# Play 3: AI LXC — Docker + NVIDIA toolkit + AI stack
+# =============================================================
+- name: Provision AI LXC
+  hosts: ai_lxc
+  gather_facts: false
+  tags: [provision, docker, ai]
+
+  vars:
+    nvidia_driver_version: "570.124.04"
+    nvidia_driver_url: "https://us.download.nvidia.com/XFree86/Linux-x86_64/{{ nvidia_driver_version }}/NVIDIA-Linux-x86_64-{{ nvidia_driver_version }}.run"
+    nvidia_driver_file: "/tmp/NVIDIA-Linux-x86_64-{{ nvidia_driver_version }}.run"
+    ai_stack_dir: /opt/ai-stack
+    ai_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/gpu.sops.yml') | from_yaml }}"
+
+  pre_tasks:
+    - name: Wait for SSH connection
+      ansible.builtin.wait_for_connection:
+        timeout: 60
+
+    - name: Gather facts
+      ansible.builtin.setup:
+
+  tasks:
+
+    # --- Base packages ---
+
+    - name: Install base packages
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+          - python3
+          - wget
+          - jq
+        state: present
+        update_cache: true
+
+    # ==========================================================
+    # NVIDIA userspace driver (must match host version exactly)
+    # ==========================================================
+
+    - name: Check if nvidia-smi works in LXC
+      ansible.builtin.command: nvidia-smi
+      register: nvidia_smi_lxc
+      ignore_errors: true
+      changed_when: false
+
+    - name: Skip NVIDIA driver install if nvidia-smi works
+      ansible.builtin.debug:
+        msg: "NVIDIA userspace driver already installed, skipping"
+      when: nvidia_smi_lxc.rc == 0
+
+    - name: Install NVIDIA userspace driver in LXC
+      when: nvidia_smi_lxc.rc != 0
+      block:
+
+        - name: Download NVIDIA driver (same version as host)
+          ansible.builtin.get_url:
+            url: "{{ nvidia_driver_url }}"
+            dest: "{{ nvidia_driver_file }}"
+            mode: "0755"
+
+        - name: Install NVIDIA userspace driver (no kernel modules)
+          ansible.builtin.command: >
+            {{ nvidia_driver_file }}
+            --no-kernel-modules
+            --no-questions
+            --ui=none
+          register: nvidia_lxc_install
+          changed_when: true
+
+        - name: Show NVIDIA LXC install output
+          ansible.builtin.debug:
+            var: nvidia_lxc_install.stdout_lines
+
+        - name: Clean up NVIDIA installer
+          ansible.builtin.file:
+            path: "{{ nvidia_driver_file }}"
+            state: absent
+
+    - name: Verify nvidia-smi in LXC
+      ansible.builtin.command: nvidia-smi
+      register: nvidia_smi_verify
+      changed_when: false
+
+    - name: Show nvidia-smi output in LXC
+      ansible.builtin.debug:
+        var: nvidia_smi_verify.stdout_lines
+
+    # ==========================================================
+    # Docker Engine
+    # ==========================================================
+
+    - name: Create keyrings directory
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Download Docker GPG key
+      ansible.builtin.get_url:
+        url: https://download.docker.com/linux/debian/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        mode: "0644"
+
+    - name: Add Docker apt repository
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/docker.list
+        content: >
+          deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc]
+          https://download.docker.com/linux/debian
+          {{ ansible_facts['distribution_release'] }} stable
+        mode: "0644"
+
+    - name: Install Docker Engine
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: true
+
+    # ==========================================================
+    # NVIDIA Container Toolkit
+    # ==========================================================
+
+    - name: Download NVIDIA Container Toolkit GPG key
+      ansible.builtin.get_url:
+        url: https://nvidia.github.io/libnvidia-container/gpgkey
+        dest: /etc/apt/keyrings/nvidia-container-toolkit.asc
+        mode: "0644"
+
+    - name: Add NVIDIA Container Toolkit apt repository
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/nvidia-container-toolkit.list
+        content: >
+          deb [signed-by=/etc/apt/keyrings/nvidia-container-toolkit.asc]
+          https://nvidia.github.io/libnvidia-container/stable/deb/$(ARCH) /
+        mode: "0644"
+
+    - name: Install NVIDIA Container Toolkit
+      ansible.builtin.apt:
+        name:
+          - nvidia-container-toolkit
+        state: present
+        update_cache: true
+
+    - name: Set no-cgroups = true for LXC compatibility
+      ansible.builtin.lineinfile:
+        path: /etc/nvidia-container-runtime/config.toml
+        regexp: '^#?\s*no-cgroups\s*='
+        line: 'no-cgroups = true'
+      notify: restart docker
+
+    - name: Configure Docker runtime for NVIDIA
+      ansible.builtin.command: nvidia-ctk runtime configure --runtime=docker
+      register: nvidia_ctk_configure
+      changed_when: "'already configured' not in nvidia_ctk_configure.stdout"
+      notify: restart docker
+
+    # --- Configure Docker daemon ---
+
+    - name: Configure Docker daemon
+      ansible.builtin.copy:
+        dest: /etc/docker/daemon.json
+        content: |
+          {
+            "storage-driver": "overlay2",
+            "log-driver": "json-file",
+            "log-opts": {
+              "max-size": "10m",
+              "max-file": "3"
+            },
+            "default-runtime": "nvidia",
+            "runtimes": {
+              "nvidia": {
+                "path": "nvidia-container-runtime",
+                "runtimeArgs": []
+              }
+            }
+          }
+        owner: root
+        group: root
+        mode: "0644"
+      notify: restart docker
+
+    # --- Enable services ---
+
+    - name: Enable Docker and containerd
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+      loop:
+        - docker
+        - containerd
+
+    - name: Flush handlers (ensure Docker is restarted before GPU test)
+      ansible.builtin.meta: flush_handlers
+
+    # --- Verify Docker + GPU ---
+
+    - name: Check Docker version
+      ansible.builtin.command: docker version
+      register: docker_version
+      changed_when: false
+
+    - name: Show Docker version
+      ansible.builtin.debug:
+        var: docker_version.stdout_lines
+
+    - name: Test Docker GPU access
+      ansible.builtin.command: >
+        docker run --rm --gpus all
+        nvidia/cuda:12.6.0-base-ubuntu24.04 nvidia-smi
+      register: docker_gpu_test
+      changed_when: false
+
+    - name: Show Docker GPU test output
+      ansible.builtin.debug:
+        var: docker_gpu_test.stdout_lines
+
+    # ==========================================================
+    # Deploy AI compose stack
+    # ==========================================================
+
+    - name: Create AI stack directory
+      ansible.builtin.file:
+        path: "{{ ai_stack_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Create Ollama data directory
+      ansible.builtin.file:
+        path: "{{ ai_stack_dir }}/ollama"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Create Speaches cache directory
+      ansible.builtin.file:
+        path: "{{ ai_stack_dir }}/speaches"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Write .env file
+      ansible.builtin.copy:
+        dest: "{{ ai_stack_dir }}/.env"
+        content: |
+          DOMAIN={{ ai_secrets.domain }}
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+
+    - name: Write docker-compose.yml
+      ansible.builtin.copy:
+        dest: "{{ ai_stack_dir }}/docker-compose.yml"
+        content: |
+          services:
+
+            ollama:
+              image: ollama/ollama:latest
+              container_name: ollama
+              restart: unless-stopped
+              ports:
+                - "0.0.0.0:11434:11434"
+              volumes:
+                - /opt/ai-stack/ollama:/root/.ollama
+              environment:
+                - NVIDIA_VISIBLE_DEVICES=all
+                - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+              deploy:
+                resources:
+                  reservations:
+                    devices:
+                      - driver: nvidia
+                        count: all
+                        capabilities: [gpu]
+              labels:
+                - "traefik.enable=true"
+                - "traefik.http.routers.ollama.rule=Host(`ollama.${DOMAIN}`)"
+                - "traefik.http.services.ollama.loadbalancer.server.port=11434"
+
+            speaches:
+              image: ghcr.io/speaches-ai/speaches:latest-cuda
+              container_name: speaches
+              restart: unless-stopped
+              ports:
+                - "0.0.0.0:8000:8000"
+              volumes:
+                - /opt/ai-stack/speaches:/root/.cache
+              environment:
+                - NVIDIA_VISIBLE_DEVICES=all
+                - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+                - WHISPER__MODEL=Systran/faster-whisper-large-v3
+                - WHISPER__DEVICE=cuda
+                - WHISPER__COMPUTE_TYPE=float16
+              deploy:
+                resources:
+                  reservations:
+                    devices:
+                      - driver: nvidia
+                        count: all
+                        capabilities: [gpu]
+              labels:
+                - "traefik.enable=true"
+                - "traefik.http.routers.speaches.rule=Host(`whisper.${DOMAIN}`)"
+                - "traefik.http.services.speaches.loadbalancer.server.port=8000"
+
+            traefik-kop:
+              image: ghcr.io/jittering/traefik-kop:latest
+              container_name: traefik-kop
+              restart: unless-stopped
+              volumes:
+                - /var/run/docker.sock:/var/run/docker.sock:ro
+              environment:
+                - REDIS_ADDR=192.168.0.159:6379
+                - BIND_IP=192.168.0.163
+                - POLL_INTERVAL=5
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Pull AI stack images
+      ansible.builtin.command:
+        cmd: docker compose pull
+        chdir: "{{ ai_stack_dir }}"
+      changed_when: true
+
+    - name: Start AI stack
+      ansible.builtin.command:
+        cmd: docker compose up -d
+        chdir: "{{ ai_stack_dir }}"
+      changed_when: true
+
+    # ==========================================================
+    # Verify
+    # ==========================================================
+
+    - name: Wait for Ollama to be ready
+      ansible.builtin.uri:
+        url: http://localhost:11434/api/tags
+        method: GET
+        return_content: true
+      register: ollama_health
+      retries: 12
+      delay: 5
+      until: ollama_health.status == 200
+
+    - name: Show Ollama API response
+      ansible.builtin.debug:
+        var: ollama_health.json
+
+    - name: Wait for Speaches to be ready (model download may take a while)
+      ansible.builtin.uri:
+        url: http://localhost:8000/v1/models
+        method: GET
+        return_content: true
+      register: speaches_health
+      retries: 60
+      delay: 10
+      until: speaches_health.status == 200
+      ignore_errors: true
+
+    - name: Show Speaches API response
+      ansible.builtin.debug:
+        var: speaches_health.json
+      when: speaches_health.status is defined and speaches_health.status == 200
+
+    - name: Show Speaches status (may still be downloading model)
+      ansible.builtin.debug:
+        msg: "Speaches may still be downloading the whisper model. Check manually: curl http://192.168.0.163:8000/v1/models"
+      when: speaches_health.status is not defined or speaches_health.status != 200
+
+    - name: Check all containers running
+      ansible.builtin.command:
+        cmd: docker compose ps
+        chdir: "{{ ai_stack_dir }}"
+      register: compose_status
+      changed_when: false
+
+    - name: Show container status
+      ansible.builtin.debug:
+        var: compose_status.stdout_lines
+
+    - name: Show access info
+      ansible.builtin.debug:
+        msg:
+          - "AI LXC 203 provisioned at 192.168.0.163"
+          - "Ollama API: http://192.168.0.163:11434"
+          - "Speaches API: http://192.168.0.163:8000"
+          - "To pull a model: docker exec ollama ollama pull llama3.1:8b"
+
+  handlers:
+    - name: restart docker
+      ansible.builtin.systemd:
+        name: docker
+        state: restarted
