@@ -237,7 +237,9 @@
     - name: Add SSH authorized key for {{ dev_user }}
       ansible.builtin.copy:
         dest: "/home/{{ dev_user }}/.ssh/authorized_keys"
-        content: "{{ ssh_pubkey }}\n"
+        content: |
+          {{ ssh_pubkey }}
+          ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPWruuYYk7NyzXmZZgAU8zACed1WED4cmn1dCL7Gj4RN jonathanadmin@MacBook-Pro-van-Jonathan.local
         owner: "{{ dev_user }}"
         group: "{{ dev_user }}"
         mode: "0600"
