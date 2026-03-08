@@ -368,11 +368,10 @@
     # openfortivpn
     # ==========================================================
 
-    - name: Install openfortivpn
+    - name: Install openconnect
       ansible.builtin.apt:
         name:
-          - openfortivpn
-          - ppp
+          - openconnect
         state: present
 
     # ==========================================================
