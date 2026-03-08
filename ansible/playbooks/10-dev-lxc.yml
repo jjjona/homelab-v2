@@ -241,12 +241,6 @@
         group: "{{ dev_user }}"
         mode: "0600"
 
-    - name: Add {{ dev_user }} to docker group
-      ansible.builtin.user:
-        name: "{{ dev_user }}"
-        groups: docker
-        append: true
-
     # ==========================================================
     # Git config
     # ==========================================================
@@ -315,6 +309,12 @@
         group: root
         mode: "0644"
       notify: restart docker
+
+    - name: Add {{ dev_user }} to docker group
+      ansible.builtin.user:
+        name: "{{ dev_user }}"
+        groups: docker
+        append: true
 
     - name: Enable Docker and containerd
       ansible.builtin.systemd:
