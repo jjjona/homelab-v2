@@ -278,6 +278,8 @@
               service: http://traefik:81
             - hostname: summarize.{{ secrets.domain }}
               service: http://traefik:81
+            - hostname: dev.{{ secrets.domain }}
+              service: ssh://192.168.0.164:22
             - service: http://traefik:80
         owner: "65532"
         group: "65532"
