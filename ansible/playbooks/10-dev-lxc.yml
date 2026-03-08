@@ -115,6 +115,42 @@
               lxc.cgroup2.devices.allow: c 10:200 rwm
               lxc.mount.entry: /dev/net dev/net none bind,create=dir
 
+        - name: Load PPP kernel modules on host
+          ansible.builtin.command: modprobe {{ item }}
+          loop:
+            - ppp_generic
+            - ppp_async
+            - ppp_deflate
+            - ppp_mppe
+          changed_when: false
+
+        - name: Persist PPP modules across reboots
+          ansible.builtin.copy:
+            dest: /etc/modules-load.d/ppp.conf
+            content: |
+              ppp_generic
+              ppp_async
+              ppp_deflate
+              ppp_mppe
+            owner: root
+            group: root
+            mode: "0644"
+
+        - name: Set /dev/ppp permissions for unprivileged LXC
+          ansible.builtin.file:
+            path: /dev/ppp
+            owner: "100000"
+            group: "100000"
+            mode: "0660"
+
+        - name: Add PPP device passthrough to LXC config
+          ansible.builtin.blockinfile:
+            path: "/etc/pve/lxc/{{ ct_id }}.conf"
+            marker: "# {mark} PPP PASSTHROUGH"
+            block: |
+              lxc.cgroup2.devices.allow: c 108:0 rwm
+              lxc.mount.entry: /dev/ppp dev/ppp none bind,optional,create=file
+
         - name: Ensure /dev/net/tun exists on host
           ansible.builtin.command: mknod /dev/net/tun c 10 200
           args:
