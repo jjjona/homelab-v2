@@ -201,6 +201,7 @@
           - htop
           - unzip
           - build-essential
+          - tmux
         state: present
         update_cache: true
 
