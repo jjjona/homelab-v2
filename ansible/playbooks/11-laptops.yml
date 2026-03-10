@@ -1,0 +1,471 @@
+---
+# 11-laptops.yml
+# Provisions two Alpine Linux laptops as Docker nodes in the homelab cluster:
+#   - Laptop 1 (.165): General-purpose Docker node with traefik-kop
+#   - Laptop 2 (.166): AI workload node with NVIDIA GTX 1060 GPU (Ollama + Speaches)
+#
+# Both laptops run Alpine Linux (lightweight, ~50MB RAM idle) with Docker.
+# traefik-kop on each laptop syncs Docker labels → Redis (.159) → Traefik,
+# enabling automatic service discovery without a cluster orchestrator.
+#
+# Prerequisites (manual, not automated):
+#   - Alpine Linux installed (setup-alpine from USB)
+#   - Static IP configured (/etc/network/interfaces)
+#   - SSH key auth enabled
+#   - Python3 installed (apk add python3)
+#   - Docker + docker-compose-plugin installed (apk add docker docker-cli-compose)
+#   - Laptop 2: NVIDIA driver 570.133.07 compiled from source with gcompat
+#     (see NVIDIA notes below)
+#
+# NVIDIA driver on Alpine (Laptop 2 only — manual step):
+#   apk add gcompat musl-fts-dev linux-headers build-base
+#   # Download NVIDIA-Linux-x86_64-570.133.07.run
+#   LD_PRELOAD=/usr/lib/libfts.so ./NVIDIA-Linux-x86_64-570.133.07.run \
+#     --no-questions --ui=none --no-kernel-modules
+#   # nvidia-container-toolkit does NOT work on Alpine (glibc binaries)
+#   # Instead, use Docker devices: + bind-mount host nvidia libs
+#
+# Safe to re-run: compose deploy is idempotent, system config uses state checks.
+
+# =============================================================
+# Play 1: Common setup for both laptops
+# =============================================================
+- name: Provision laptops (common)
+  hosts: laptop1,laptop2
+  gather_facts: false
+  tags: [common, provision]
+
+  pre_tasks:
+    - name: Wait for SSH connection
+      ansible.builtin.wait_for_connection:
+        timeout: 60
+
+    - name: Gather facts
+      ansible.builtin.setup:
+
+  tasks:
+
+    # --- System configuration ---
+
+    - name: Disable lid close action (headless server)
+      ansible.builtin.copy:
+        dest: /etc/acpi/handler.sh
+        content: |
+          #!/bin/sh
+          # Disable all ACPI actions (headless laptop server)
+          # Lid close, power button — all ignored
+          exit 0
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Ensure acpid is enabled
+      ansible.builtin.service:
+        name: acpid
+        enabled: true
+        state: started
+
+    - name: Enable IP forwarding
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/docker.conf
+        content: |
+          net.ipv4.ip_forward = 1
+          net.bridge.bridge-nf-call-iptables = 1
+          net.bridge.bridge-nf-call-ip6tables = 1
+        owner: root
+        group: root
+        mode: "0644"
+      register: sysctl_conf
+
+    - name: Apply sysctl settings
+      ansible.builtin.command: sysctl -p /etc/sysctl.d/docker.conf
+      when: sysctl_conf.changed
+
+    - name: Load br_netfilter module
+      ansible.builtin.command: modprobe br_netfilter
+      changed_when: false
+
+    - name: Persist br_netfilter on boot
+      ansible.builtin.copy:
+        dest: /etc/modules-load.d/docker.conf
+        content: |
+          br_netfilter
+        owner: root
+        group: root
+        mode: "0644"
+
+    # --- Ensure Docker is running ---
+
+    - name: Enable Docker service
+      ansible.builtin.service:
+        name: docker
+        enabled: true
+        state: started
+
+    - name: Configure Docker daemon (log rotation)
+      ansible.builtin.copy:
+        dest: /etc/docker/daemon.json
+        content: |
+          {
+            "storage-driver": "overlay2",
+            "log-driver": "json-file",
+            "log-opts": {
+              "max-size": "10m",
+              "max-file": "3"
+            }
+          }
+        owner: root
+        group: root
+        mode: "0644"
+      register: docker_daemon_config
+
+    - name: Restart Docker if config changed
+      ansible.builtin.service:
+        name: docker
+        state: restarted
+      when: docker_daemon_config.changed
+
+    - name: Verify Docker is working
+      ansible.builtin.command: docker version
+      register: docker_version
+      changed_when: false
+
+    - name: Show Docker version
+      ansible.builtin.debug:
+        var: docker_version.stdout_lines
+
+# =============================================================
+# Play 2: Laptop 1 — traefik-kop only
+# =============================================================
+- name: Deploy traefik-kop on Laptop 1
+  hosts: laptop1
+  gather_facts: false
+  tags: [laptop1, traefik-kop]
+
+  vars:
+    stack_dir: /opt/docker
+
+  tasks:
+
+    - name: Create stack directory
+      ansible.builtin.file:
+        path: "{{ stack_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Write docker-compose.yml
+      ansible.builtin.copy:
+        dest: "{{ stack_dir }}/docker-compose.yml"
+        content: |
+          services:
+            traefik-kop:
+              image: ghcr.io/jittering/traefik-kop:latest
+              container_name: traefik-kop
+              restart: unless-stopped
+              volumes:
+                - /var/run/docker.sock:/var/run/docker.sock:ro
+              environment:
+                - REDIS_ADDR=192.168.0.159:6379
+                - BIND_IP=192.168.0.165
+                - POLL_INTERVAL=5
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Pull images
+      ansible.builtin.command:
+        cmd: docker compose pull
+        chdir: "{{ stack_dir }}"
+      changed_when: true
+
+    - name: Start traefik-kop
+      ansible.builtin.command:
+        cmd: docker compose up -d
+        chdir: "{{ stack_dir }}"
+      changed_when: true
+
+    - name: Verify traefik-kop is running
+      ansible.builtin.command:
+        cmd: docker compose ps
+        chdir: "{{ stack_dir }}"
+      register: compose_status
+      changed_when: false
+
+    - name: Show container status
+      ansible.builtin.debug:
+        var: compose_status.stdout_lines
+
+    - name: Show Laptop 1 access info
+      ansible.builtin.debug:
+        msg:
+          - "Laptop 1 provisioned at 192.168.0.165"
+          - "traefik-kop: syncing Docker labels → Redis (.159) → Traefik"
+          - "Ready for additional workloads via docker-compose"
+
+# =============================================================
+# Play 3: Laptop 2 — AI stack with GPU
+# =============================================================
+- name: Deploy AI stack on Laptop 2
+  hosts: laptop2
+  gather_facts: false
+  tags: [laptop2, ai, gpu]
+
+  vars:
+    ai_stack_dir: /opt/ai-stack
+    nvidia_driver_version: "570.133.07"
+    ai_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/gpu.sops.yml') | from_yaml }}"
+
+  tasks:
+
+    # --- Verify NVIDIA driver ---
+
+    - name: Check if nvidia-smi works
+      ansible.builtin.command: nvidia-smi
+      register: nvidia_smi_check
+      ignore_errors: true
+      changed_when: false
+
+    - name: Show nvidia-smi output
+      ansible.builtin.debug:
+        var: nvidia_smi_check.stdout_lines
+      when: nvidia_smi_check.rc == 0
+
+    - name: Warn if NVIDIA driver not installed
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: nvidia-smi not working. NVIDIA driver must be compiled from source
+          on Alpine. See playbook header comments for manual steps.
+          Driver version should match: {{ nvidia_driver_version }}
+      when: nvidia_smi_check.rc != 0
+
+    - name: Ensure NVIDIA modules loaded on boot
+      ansible.builtin.copy:
+        dest: /etc/modules-load.d/nvidia.conf
+        content: |
+          nvidia
+          nvidia-uvm
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Ensure nouveau is blacklisted
+      ansible.builtin.copy:
+        dest: /etc/modprobe.d/blacklist-nouveau.conf
+        content: |
+          blacklist nouveau
+          options nouveau modeset=0
+        owner: root
+        group: root
+        mode: "0644"
+
+    # --- Detect nvidia library paths for bind mounts ---
+
+    - name: Find nvidia-ml library path
+      ansible.builtin.shell: ls /usr/lib/libnvidia-ml.so.{{ nvidia_driver_version }} 2>/dev/null || echo "NOT_FOUND"
+      register: nvidia_ml_lib
+      changed_when: false
+
+    - name: Find libcuda library path
+      ansible.builtin.shell: ls /usr/lib/libcuda.so.{{ nvidia_driver_version }} 2>/dev/null || echo "NOT_FOUND"
+      register: cuda_lib
+      changed_when: false
+
+    - name: Find ptxjitcompiler library path
+      ansible.builtin.shell: ls /usr/lib/libnvidia-ptxjitcompiler.so.{{ nvidia_driver_version }} 2>/dev/null || echo "NOT_FOUND"
+      register: ptx_lib
+      changed_when: false
+
+    # --- Deploy AI compose stack ---
+
+    - name: Create AI stack directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - "{{ ai_stack_dir }}"
+        - "{{ ai_stack_dir }}/ollama"
+        - "{{ ai_stack_dir }}/speaches"
+
+    - name: Write .env file
+      ansible.builtin.copy:
+        dest: "{{ ai_stack_dir }}/.env"
+        content: |
+          DOMAIN={{ ai_secrets.domain }}
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+
+    - name: Write docker-compose.yml (GPU device passthrough)
+      ansible.builtin.copy:
+        dest: "{{ ai_stack_dir }}/docker-compose.yml"
+        content: |
+          services:
+
+            traefik-kop:
+              image: ghcr.io/jittering/traefik-kop:latest
+              container_name: traefik-kop
+              restart: unless-stopped
+              volumes:
+                - /var/run/docker.sock:/var/run/docker.sock:ro
+              environment:
+                - REDIS_ADDR=192.168.0.159:6379
+                - BIND_IP=192.168.0.166
+                - POLL_INTERVAL=5
+
+            ollama:
+              image: ollama/ollama:latest
+              container_name: ollama
+              restart: unless-stopped
+              ports:
+                - "0.0.0.0:11434:11434"
+              devices:
+                - /dev/nvidia0:/dev/nvidia0
+                - /dev/nvidiactl:/dev/nvidiactl
+                - /dev/nvidia-uvm:/dev/nvidia-uvm
+              volumes:
+                - /opt/ai-stack/ollama:/root/.ollama
+                - /usr/lib/libnvidia-ml.so.{{ nvidia_driver_version }}:/usr/lib/libnvidia-ml.so.1:ro
+                - /usr/lib/libcuda.so.{{ nvidia_driver_version }}:/usr/lib/libcuda.so.1:ro
+                - /usr/lib/libnvidia-ptxjitcompiler.so.{{ nvidia_driver_version }}:/usr/lib/libnvidia-ptxjitcompiler.so.1:ro
+              environment:
+                - NVIDIA_VISIBLE_DEVICES=all
+              labels:
+                - "traefik.enable=true"
+                - "traefik.http.routers.ollama.rule=Host(`ollama.${DOMAIN}`)"
+                - "traefik.http.services.ollama.loadbalancer.server.port=11434"
+
+            speaches:
+              image: ghcr.io/speaches-ai/speaches:latest-cuda
+              container_name: speaches
+              restart: unless-stopped
+              ports:
+                - "0.0.0.0:8000:8000"
+              devices:
+                - /dev/nvidia0:/dev/nvidia0
+                - /dev/nvidiactl:/dev/nvidiactl
+                - /dev/nvidia-uvm:/dev/nvidia-uvm
+              volumes:
+                - /opt/ai-stack/speaches:/root/.cache
+                - /usr/lib/libnvidia-ml.so.{{ nvidia_driver_version }}:/usr/lib/libnvidia-ml.so.1:ro
+                - /usr/lib/libcuda.so.{{ nvidia_driver_version }}:/usr/lib/libcuda.so.1:ro
+                - /usr/lib/libnvidia-ptxjitcompiler.so.{{ nvidia_driver_version }}:/usr/lib/libnvidia-ptxjitcompiler.so.1:ro
+              environment:
+                - NVIDIA_VISIBLE_DEVICES=all
+                - WHISPER__MODEL=Systran/faster-whisper-large-v3
+                - WHISPER__DEVICE=cuda
+                - WHISPER__COMPUTE_TYPE=float16
+              labels:
+                - "traefik.enable=true"
+                - "traefik.http.routers.speaches.rule=Host(`whisper.${DOMAIN}`)"
+                - "traefik.http.services.speaches.loadbalancer.server.port=8000"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Pull AI stack images
+      ansible.builtin.command:
+        cmd: docker compose pull
+        chdir: "{{ ai_stack_dir }}"
+      changed_when: true
+
+    - name: Start AI stack
+      ansible.builtin.command:
+        cmd: docker compose up -d
+        chdir: "{{ ai_stack_dir }}"
+      changed_when: true
+
+    # --- Verify ---
+
+    - name: Wait for Ollama to be ready
+      ansible.builtin.uri:
+        url: http://localhost:11434/api/tags
+        method: GET
+        return_content: true
+      register: ollama_health
+      retries: 12
+      delay: 5
+      until: ollama_health.status == 200
+
+    - name: Show Ollama API response
+      ansible.builtin.debug:
+        var: ollama_health.json
+
+    - name: Check all containers running
+      ansible.builtin.command:
+        cmd: docker compose ps
+        chdir: "{{ ai_stack_dir }}"
+      register: compose_status
+      changed_when: false
+
+    - name: Show container status
+      ansible.builtin.debug:
+        var: compose_status.stdout_lines
+
+    - name: Show Laptop 2 access info
+      ansible.builtin.debug:
+        msg:
+          - "Laptop 2 (AI) provisioned at 192.168.0.166"
+          - "GPU: NVIDIA GTX 1060 6GB (driver {{ nvidia_driver_version }})"
+          - "Ollama API: http://192.168.0.166:11434"
+          - "Speaches API: http://192.168.0.166:8000"
+          - "traefik-kop: syncing Docker labels → Redis (.159) → Traefik"
+          - "To pull a model: ssh root@192.168.0.166 docker exec ollama ollama pull llama3.2:1b"
+
+# =============================================================
+# Play 4: Arcane agents (all remote Docker hosts)
+# =============================================================
+- name: Deploy Arcane agents
+  hosts: laptop1,laptop2
+  gather_facts: false
+  tags: [arcane, agents]
+
+  vars:
+    arcane_dir: /opt/arcane-agent
+
+  tasks:
+
+    - name: Create Arcane agent directory
+      ansible.builtin.file:
+        path: "{{ arcane_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Write Arcane agent docker-compose.yml
+      ansible.builtin.copy:
+        dest: "{{ arcane_dir }}/docker-compose.yml"
+        content: |
+          services:
+            arcane-agent:
+              image: ghcr.io/getarcaneapp/arcane-headless:latest
+              container_name: arcane-agent
+              ports:
+                - '3553:3553'
+              environment:
+                - AGENT_MODE=true
+                - AGENT_TOKEN=PASTE_TOKEN_HERE
+                - MANAGER_API_URL=http://192.168.0.159:3552
+              volumes:
+                - /var/run/docker.sock:/var/run/docker.sock
+                - agent-data:/app/data
+              restart: unless-stopped
+          volumes:
+            agent-data:
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Show Arcane agent setup info
+      ansible.builtin.debug:
+        msg:
+          - "Arcane agent compose file deployed to {{ arcane_dir }}"
+          - "To activate: create an environment in Arcane UI (arcane.DOMAIN)"
+          - "Copy the AGENT_TOKEN, edit {{ arcane_dir }}/docker-compose.yml"
+          - "Then: cd {{ arcane_dir }} && docker compose up -d"

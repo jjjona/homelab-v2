@@ -8,8 +8,8 @@
 #   - MCP servers (jade-knowledge + jade-journal) for both Claude Code and OpenCode
 #   - Persona slash commands via jade-prompts repo
 #
-# 3-node architecture: Jade (.160) / Pandora (.161) / Live (.159)
-# jade can SSH into Pandora and Live, push/pull repos from Gitea via SSH.
+# 3-node architecture: Jade (.160) / Pandora (.161) / Docker Host (.159)
+# jade can SSH into Pandora and Docker Host, push/pull repos from Gitea via SSH.
 # traefik-kop on Pandora syncs Docker labels to Traefik via Redis.
 # Claude Code / OpenCode auth is manual (interactive login after deploy).
 #

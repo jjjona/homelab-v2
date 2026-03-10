@@ -204,7 +204,7 @@
         body_format: json
         body: >-
           {{ sonarr_profile_6.json | combine({
-            'upgradeAllowed': false,
+            'upgradeAllowed': true,
             'minFormatScore': 0,
             'cutoffFormatScore': 150,
             'formatItems': [{'format': sonarr_dual_audio_id | int, 'name': 'Dual Audio', 'score': 150}]
@@ -364,7 +364,7 @@
         body_format: json
         body: >-
           {{ radarr_profile_6.json | combine({
-            'upgradeAllowed': false,
+            'upgradeAllowed': true,
             'minFormatScore': 0,
             'cutoffFormatScore': 150,
             'formatItems': [{'format': radarr_dual_audio_id | int, 'name': 'Dual Audio', 'score': 150}]

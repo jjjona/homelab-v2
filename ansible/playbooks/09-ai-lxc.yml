@@ -1,5 +1,10 @@
 ---
 # 09-ai-lxc.yml
+# DEPRECATED: AI workloads moved to Laptop 2 (.166) with GTX 1060 GPU.
+# See 11-laptops.yml for the current AI stack deployment.
+# This playbook is kept for reference only. AI LXC 203 is stopped.
+#
+# Original purpose:
 # Sets up NVIDIA GPU on Proxmox host and creates an AI LXC with GPU passthrough:
 #   - Play 1: Proxmox host — install NVIDIA driver with DKMS, blacklist nouveau
 #   - Play 2: Proxmox host — create AI LXC 203 (.163) with NVIDIA device bind mounts
