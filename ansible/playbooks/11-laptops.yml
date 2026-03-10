@@ -438,26 +438,24 @@
         group: root
         mode: "0755"
 
-    - name: Write Arcane agent docker-compose.yml
+    - name: Write Arcane edge agent docker-compose.yml
       ansible.builtin.copy:
         dest: "{{ arcane_dir }}/docker-compose.yml"
         content: |
           services:
-            arcane-agent:
+            arcane-edge-agent:
               image: ghcr.io/getarcaneapp/arcane-headless:latest
-              container_name: arcane-agent
-              ports:
-                - '3553:3553'
+              container_name: arcane-edge-agent
+              restart: unless-stopped
               environment:
-                - AGENT_MODE=true
+                - EDGE_AGENT=true
                 - AGENT_TOKEN=PASTE_TOKEN_HERE
                 - MANAGER_API_URL=http://192.168.0.159:3552
               volumes:
                 - /var/run/docker.sock:/var/run/docker.sock
-                - agent-data:/app/data
-              restart: unless-stopped
+                - arcane-data:/app/data
           volumes:
-            agent-data:
+            arcane-data:
         owner: root
         group: root
         mode: "0644"
@@ -465,7 +463,6 @@
     - name: Show Arcane agent setup info
       ansible.builtin.debug:
         msg:
-          - "Arcane agent compose file deployed to {{ arcane_dir }}"
-          - "To activate: create an environment in Arcane UI (arcane.DOMAIN)"
-          - "Copy the AGENT_TOKEN, edit {{ arcane_dir }}/docker-compose.yml"
+          - "Arcane edge agent compose file deployed to {{ arcane_dir }}"
+          - "Create edge environment in Arcane API, set AGENT_TOKEN to the apiKey"
           - "Then: cd {{ arcane_dir }} && docker compose up -d"

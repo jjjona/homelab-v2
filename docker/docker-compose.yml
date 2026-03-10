@@ -98,6 +98,8 @@ services:
   arcane:
     image: ghcr.io/getarcaneapp/arcane:latest
     container_name: arcane
+    ports:
+      - "0.0.0.0:3552:3552"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /mnt/data/docker/arcane/data:/app/data
