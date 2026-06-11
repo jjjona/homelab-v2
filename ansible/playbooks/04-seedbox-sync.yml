@@ -68,14 +68,20 @@
           echo "$(date): Starting sync" >> "$LOGFILE"
 
           # Sync movies
-          rsync -avz --ignore-existing --chown=100000:100000 \
+          # --partial keeps interrupted transfers resumable.
+          # No --ignore-existing: rsync's default size+mtime check re-pulls partial files,
+          # skips already-complete ones. --ignore-existing would lock in any partial file
+          # caught mid-write by qBittorrent.
+          rsync -avz --partial --chown=100000:100000 \
             -e "ssh -i $SSH_KEY -p {{ seedbox.seedbox_port }}" \
             "${REMOTE}:${REMOTE_BASE}/movies/" \
             "${LOCAL_BASE}/movies/" \
             >> "$LOGFILE" 2>&1
 
           # Sync TV
-          rsync -avz --ignore-existing --chown=100000:100000 \
+          # --exclude entries: duplicate releases of shows already imported in another release.
+          rsync -avz --partial --chown=100000:100000 \
+            --exclude="Steins Gate S01 1080p BluRay FLAC2.0 x264-NTb/" \
             -e "ssh -i $SSH_KEY -p {{ seedbox.seedbox_port }}" \
             "${REMOTE}:${REMOTE_BASE}/tv/" \
             "${LOCAL_BASE}/tv/" \
