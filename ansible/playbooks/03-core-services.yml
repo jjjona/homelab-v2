@@ -246,6 +246,9 @@
           LG_BASE_URL={{ secrets.lg_base_url }}
           BOOKLORE_DB_ROOT_PASSWORD={{ secrets.booklore_db_root_password }}
           BOOKLORE_DB_PASSWORD={{ secrets.booklore_db_password }}
+          SONARR_API_KEY={{ secrets.sonarr_api_key }}
+          RADARR_API_KEY={{ secrets.radarr_api_key }}
+          LIDARR_API_KEY={{ secrets.lidarr_api_key }}
         owner: root
         group: root
         mode: "0600"
