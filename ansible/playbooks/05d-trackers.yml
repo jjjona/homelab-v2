@@ -4,7 +4,7 @@
 # Prerequisites: 05b-arr-config.yml must have been run (Prowlarr apps + Autobrr account).
 #
 # What this playbook does:
-#   - Prowlarr:  TorrentLeech indexer (username/password), FearNoPeer indexer (API key)
+#   - Prowlarr:  TorrentLeech indexer (username/password)
 #   - Autobrr:   TorrentLeech indexer + IRC network + freeleech filter + Seedbox action
 
 - name: Configure trackers and IRC automation
@@ -64,34 +64,6 @@
               value: "{{ trackers.torrentleech_password }}"
         status_code: [200, 201]
       when: prowlarr_indexers.json | selectattr('name', 'equalto', 'TorrentLeech') | list | length == 0
-      no_log: true
-
-    - name: Prowlarr — add FearNoPeer indexer
-      ansible.builtin.uri:
-        url: "{{ prowlarr_url }}/api/v1/indexer"
-        method: POST
-        headers:
-          X-Api-Key: "{{ secrets.prowlarr_api_key }}"
-        body_format: json
-        body:
-          name: FearNoPeer
-          enable: true
-          redirect: false
-          priority: 25
-          appProfileId: 1
-          implementation: Cardigann
-          configContract: CardigannSettings
-          protocol: torrent
-          tags: []
-          fields:
-            - name: definitionFile
-              value: fearnopeer
-            - name: baseUrl
-              value: "https://fearnopeer.com/"
-            - name: apikey
-              value: "{{ trackers.fearnopeer_api_key }}"
-        status_code: [200, 201]
-      when: prowlarr_indexers.json | selectattr('name', 'equalto', 'FearNoPeer') | list | length == 0
       no_log: true
 
     # ================================================================
@@ -330,6 +302,6 @@
       ansible.builtin.debug:
         msg:
           - "Tracker configuration complete!"
-          - "Prowlarr: TorrentLeech + FearNoPeer indexers added"
+          - "Prowlarr: TorrentLeech indexer added"
           - "Autobrr: TorrentLeech IRC network configured ({{ trackers.torrentleech_irc_nick }})"
           - "Autobrr: Filter 'TL Freeleech < 5GB' with Seedbox action"
