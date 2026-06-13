@@ -280,6 +280,10 @@
               service: http://traefik:81
             - hostname: dev.{{ secrets.domain }}
               service: ssh://192.168.0.164:22
+            # hive task-inbox on :80/web — behind the tinyauth forwardAuth, since
+            # the inbox carries no auth of its own (12-hive.yml).
+            - hostname: hive.{{ secrets.domain }}
+              service: http://traefik:80
             - service: http://traefik:80
         owner: "65532"
         group: "65532"

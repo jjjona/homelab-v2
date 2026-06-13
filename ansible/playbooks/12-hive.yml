@@ -1,0 +1,712 @@
+---
+# 12-hive.yml  (DRAFT)
+# Provisions the "hive" agentic task-runner as a dedicated LXC + single Docker container.
+#
+#   - Creates unprivileged Docker-capable LXC 205 (hive, .167), mirroring 02-docker-host.yml
+#   - Installs Docker Engine + compose plugin inside it (mirroring 02-docker-host.yml Play 2)
+#   - Clones jjjona/hive to /opt/hive on the LXC (the bind-mounted /app source tree)
+#   - Writes the hive .env (TZ + HOST_HOME) and brings the stack up (docker compose up -d)
+#
+# The hive is ONE container (Dockerfile + docker-compose.yml in the repo). It holds no
+# docker access; it reaches project containers purely over SSH (see hive docs/ssh-exec.md).
+# Web inbox is published on host port 4483.
+#
+# === Architecture / mounts (from the hive repo's docker-compose.yml) ===
+#   user: hive (uid 1000) inside the container
+#   ports:    4483:4483  (task-inbox web UI; "HIVE" on a phone keypad)
+#   volumes:
+#     .:/app                          -> the /opt/hive clone (compose runs from here)
+#     hive-node-modules:/app/node_modules
+#     ${HOME}/hive/state:/state       -> per-system state (project registry, /state/ssh)
+#     ${HOME}/dev:${HOME}/dev         -> same-path mirror of host ~/dev
+#     hive-claude:/home/hive/.claude  -> persists `claude login` across rebuilds
+#     hive-codex:/home/hive/.codex    -> persists `codex login` across rebuilds
+#   env: HOST_HOME=${HOME}, TZ=Europe/Brussels
+#
+# DECISION — compose runs as root with HOME=/root (see design note in handoff):
+#   ${HOME}/hive/state therefore resolves to /root/hive/state on the LXC, and
+#   ${HOME}/dev to /root/dev. Inside the container these surface as /state and
+#   /root/dev (HOST_HOME=/root). The container's own process runs as uid 1000
+#   (user: hive in compose) regardless; only the *host-side* path expansion uses
+#   root's HOME. All `docker compose` tasks below set environment HOME=/root
+#   explicitly so the expansion is deterministic and re-run-safe.
+#
+# === Prerequisites ===
+#   - Proxmox host reachable as `proxmox` (.158); SOPS age key present locally
+#   - secrets/hive.sops.yml exists (encrypt secrets/hive.sops.yml.PLAINTEXT-DRAFT first —
+#     see that file's header). Provides domain + the dedicated hive SSH keypair.
+#   - Inventory has a `hive` host at 192.168.0.167 (add the entry — see handoff note).
+#
+# === MANUAL post-deploy step (NOT automated — no ANTHROPIC_API_KEY path) ===
+#   The hive container authenticates via a Claude subscription, which needs an
+#   interactive login. After this playbook runs:
+#     ssh root@192.168.0.167
+#     docker exec -it hive claude          # complete the OAuth/subscription login
+#     # (optional, second harness) docker exec -it hive codex login
+#   Auth persists on the hive-claude / hive-codex named volumes across rebuilds.
+#
+# === Tunable resources ===
+#   ct_cores / ct_memory / ct_swap / ct_rootfs_size below — sized for a single
+#   container that runs bun + a few agent subprocesses. Bump if intake is heavy.
+#
+# Safe to re-run: LXC creation skips if 205 already exists (block guarded by
+# pct status, like 07-ai-playground.yml); Docker install + compose deploy are
+# idempotent.
+#
+# ============================================================================
+# NOTE: Sections tagged "# TODO (task #7)" are intentionally STUBBED in this
+# draft. The core (LXC create + Docker + clone + compose up) is complete; the
+# parent finishes the TODOs and applies.
+# ============================================================================
+
+# =============================================================
+# Play 1: Proxmox host — create hive LXC 205
+# =============================================================
+- name: Create hive LXC
+  hosts: proxmox
+  gather_facts: false
+  tags: [create, hive]
+
+  vars:
+    ct_id: 205
+    ct_hostname: hive
+    ct_ip: 192.168.0.167
+    ct_gw: 192.168.0.1
+    ct_memory: 6144          # tunable — 4-6 GB is plenty for one runner container
+    ct_swap: 2048            # tunable
+    ct_cores: 4              # tunable
+    ct_rootfs_size: 30       # tunable — 20-30 GB; named volumes + clone live here
+    ct_template: debian-12-standard_12.12-1_amd64.tar.zst
+    ct_template_storage: local
+    ssh_pubkey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFG9NoQSuVYiBD5fib0bN43e2UWwH5iEeDy99cCsHrHC"
+
+  tasks:
+
+    - name: Check if LXC {{ ct_id }} exists
+      ansible.builtin.command: pct status {{ ct_id }}
+      register: ct_check
+      ignore_errors: true
+      changed_when: false
+
+    - name: Skip if LXC {{ ct_id }} is already running
+      ansible.builtin.debug:
+        msg: "LXC {{ ct_id }} already exists ({{ ct_check.stdout | default('') }}), skipping creation"
+      when: ct_check.rc == 0
+
+    - name: Create LXC {{ ct_id }}
+      when: ct_check.rc != 0
+      block:
+
+        - name: Update container template index
+          ansible.builtin.command: pveam update
+          changed_when: false
+
+        - name: Download Debian CT template
+          ansible.builtin.command: >
+            pveam download {{ ct_template_storage }} {{ ct_template }}
+          register: template_download
+          changed_when: "'already exists' not in template_download.stdout"
+          failed_when:
+            - template_download.rc != 0
+            - "'already exists' not in template_download.stderr"
+
+        - name: Write SSH public key to temp file
+          ansible.builtin.copy:
+            dest: /tmp/ct-ssh-pubkey.pub
+            content: "{{ ssh_pubkey }}\n"
+            mode: "0600"
+
+        - name: Create LXC {{ ct_id }}
+          # Unprivileged + nesting=1,keyctl=1 — the exact Docker-capable shape
+          # used for the docker-host LXC (02-docker-host.yml).
+          ansible.builtin.command: >
+            pct create {{ ct_id }}
+            {{ ct_template_storage }}:vztmpl/{{ ct_template }}
+            --hostname {{ ct_hostname }}
+            --unprivileged 1
+            --features nesting=1,keyctl=1
+            --rootfs local-lvm:{{ ct_rootfs_size }}
+            --memory {{ ct_memory }}
+            --swap {{ ct_swap }}
+            --cores {{ ct_cores }}
+            --net0 name=eth0,bridge=vmbr0,ip={{ ct_ip }}/24,gw={{ ct_gw }},firewall=0
+            --nameserver 1.1.1.1
+            --onboot 1
+            --start 0
+            --ssh-public-keys /tmp/ct-ssh-pubkey.pub
+
+        - name: Start LXC {{ ct_id }}
+          ansible.builtin.command: pct start {{ ct_id }}
+
+        - name: Wait for LXC systemd to be ready
+          ansible.builtin.command: pct exec {{ ct_id }} -- systemctl is-system-running --wait
+          register: systemd_ready
+          retries: 12
+          delay: 5
+          until: systemd_ready.rc == 0 or (systemd_ready.stdout is defined and 'running' in systemd_ready.stdout)
+          changed_when: false
+
+        - name: Remove temp SSH key file
+          ansible.builtin.file:
+            path: /tmp/ct-ssh-pubkey.pub
+            state: absent
+
+    - name: Ensure LXC {{ ct_id }} is started
+      ansible.builtin.command: pct start {{ ct_id }}
+      register: start_result
+      failed_when:
+        - start_result.rc != 0
+        - "'already running' not in start_result.stderr"
+      changed_when: start_result.rc == 0
+
+    - name: Verify LXC {{ ct_id }} status
+      ansible.builtin.command: pct status {{ ct_id }}
+      register: ct_status
+      changed_when: false
+
+    - name: Show LXC {{ ct_id }} status
+      ansible.builtin.debug:
+        var: ct_status.stdout
+
+# =============================================================
+# Play 2: hive LXC — install Docker Engine + compose plugin
+# =============================================================
+# Mirrors 02-docker-host.yml Play 2 verbatim (official Docker apt repo).
+- name: Install Docker on hive LXC
+  hosts: hive
+  gather_facts: false
+  tags: [hive, docker]
+
+  pre_tasks:
+    - name: Wait for SSH connection
+      ansible.builtin.wait_for_connection:
+        timeout: 60
+
+    - name: Gather facts
+      ansible.builtin.setup:
+
+  tasks:
+
+    # --- Prerequisites ---
+
+    - name: Install Docker prerequisites
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - git
+          - gnupg
+          - python3
+        state: present
+        update_cache: true
+
+    # --- Docker official repo ---
+
+    - name: Create keyrings directory
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Download Docker GPG key
+      ansible.builtin.get_url:
+        url: https://download.docker.com/linux/debian/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        mode: "0644"
+
+    - name: Add Docker apt repository
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/docker.list
+        content: >
+          deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc]
+          https://download.docker.com/linux/debian
+          {{ ansible_facts['distribution_release'] }} stable
+        mode: "0644"
+
+    # --- Install Docker ---
+
+    - name: Install Docker Engine
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: true
+
+    # --- Configure Docker daemon ---
+
+    - name: Configure Docker daemon
+      ansible.builtin.copy:
+        dest: /etc/docker/daemon.json
+        content: |
+          {
+            "storage-driver": "overlay2",
+            "log-driver": "json-file",
+            "log-opts": {
+              "max-size": "10m",
+              "max-file": "3"
+            }
+          }
+        owner: root
+        group: root
+        mode: "0644"
+      notify: restart docker
+
+    # --- Enable services ---
+
+    - name: Enable Docker and containerd
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+      loop:
+        - docker
+        - containerd
+
+    # --- Verify ---
+
+    - name: Check Docker version
+      ansible.builtin.command: docker version
+      register: docker_version
+      changed_when: false
+
+    - name: Show Docker version
+      ansible.builtin.debug:
+        var: docker_version.stdout_lines
+
+    - name: Check Compose version
+      ansible.builtin.command: docker compose version
+      register: compose_version
+      changed_when: false
+
+    - name: Show Compose version
+      ansible.builtin.debug:
+        var: compose_version.stdout
+
+  handlers:
+    - name: restart docker
+      ansible.builtin.systemd:
+        name: docker
+        state: restarted
+
+# =============================================================
+# Play 3: hive LXC — clone repo, seed state, write .env, deploy
+# =============================================================
+- name: Deploy hive container
+  hosts: hive
+  gather_facts: false
+  tags: [hive, deploy]
+
+  vars:
+    hive_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/hive.sops.yml') | from_yaml }}"
+    # Host path of the repo clone == compose project dir == the /app bind mount.
+    hive_repo: /opt/hive
+    # Self-hosted in Forgejo (jade/hive) — internal LAN clone, read-only token,
+    # no GitHub dependency. The upstream jjjona/hive (GitHub, private) is mirrored
+    # here; hive-update pulls from this same origin.
+    hive_repo_url: "http://oauth2:{{ hive_secrets.hive_forgejo_token }}@192.168.0.159:3001/jade/hive.git"
+    # DECISION: compose runs as root with HOME=/root, so ${HOME} in the repo's
+    # docker-compose.yml expands host-side to these:
+    hive_home: /root
+    hive_state_dir: /root/hive/state     # -> /state in the container
+    hive_dev_dir: /root/dev              # -> same-path mirror in the container
+
+  tasks:
+
+    # The hive container runs as uid 1000 (user: hive), so the clone, .env and
+    # /state are chowned to 1000 below. root (which runs the git module + compose)
+    # then needs safe.directory to operate on the 1000-owned repo on re-runs,
+    # else git aborts with "dubious ownership".
+    - name: Allow root git operations on the uid-1000-owned hive clone
+      ansible.builtin.command: git config --global --replace-all safe.directory '*'
+      changed_when: false
+
+    # --- Clone the hive repo (this IS the /app bind mount; compose runs here) ---
+
+    - name: Clone hive repo to {{ hive_repo }}
+      ansible.builtin.git:
+        repo: "{{ hive_repo_url }}"
+        dest: "{{ hive_repo }}"
+        version: main
+        update: true
+
+    # --- Seed host-side mount roots so compose doesn't mkdir them root-bare ---
+    # Docker auto-creates missing bind-mount leaves, but pre-creating keeps
+    # ownership/permissions deterministic and lets the TODO state-seeding below
+    # drop files in straight away.
+
+    - name: Create hive state + dev mount roots
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - "{{ hive_state_dir }}"
+        - "{{ hive_state_dir }}/projects"
+        - "{{ hive_state_dir }}/ssh"
+        - "{{ hive_dev_dir }}"
+
+    # --- Write the hive .env (loaded by start-hive.sh at container boot) ---
+    # HOST_HOME + TZ also come from compose's `environment:` (which wins), but
+    # the repo's .env.example pattern is to keep all per-system config here.
+    # Adapter creds get appended in the TODO section below.
+
+    - name: Write hive .env
+      ansible.builtin.copy:
+        dest: "{{ hive_repo }}/.env"
+        content: |
+          # Managed by ansible (12-hive.yml). Per-system hive config.
+          TZ=Europe/Brussels
+          HOST_HOME={{ hive_home }}
+          # HIVE_WEB_PORT defaults to 4483; uncomment to override the host port.
+          # HIVE_WEB_PORT=4483
+          #
+          # TODO (task #7): adapter credentials (HIVE_<SERVICE>_<FIELD>) from
+          # hive_secrets, e.g.:
+          #   HIVE_GITLAB_URL={{ '{{' }} hive_secrets.hive_gitlab_url {{ '}}' }}
+          #   HIVE_GITLAB_TOKEN={{ '{{' }} hive_secrets.hive_gitlab_token {{ '}}' }}
+        owner: root
+        group: root
+        mode: "0600"
+
+    # =========================================================
+    # Seed /state (ssh keypair + node-level ssh/config)
+    # =========================================================
+    # The hive reaches project containers purely over SSH (hive docs/ssh-exec.md).
+    # The hive cockpit SSHes to each NODE as the docker-group `hive_node_user` to
+    # run `docker compose`; per-project container Host aliases are added later by
+    # /onboard-project (Phase D). No project.yaml is written here.
+    #
+    # NOTE: the IdentityFile/config paths below are the IN-CONTAINER paths
+    # (/state/ssh/...), because this config is read by the ssh client running
+    # inside the hive container (which sees the bind mount as /state).
+
+    - name: Seed hive SSH private key
+      ansible.builtin.copy:
+        dest: "{{ hive_state_dir }}/ssh/id_ed25519"
+        content: "{{ hive_secrets.hive_ssh_private_key }}"
+        mode: "0600"
+      no_log: true
+
+    - name: Seed hive SSH public key
+      ansible.builtin.copy:
+        dest: "{{ hive_state_dir }}/ssh/id_ed25519.pub"
+        content: "{{ hive_secrets.hive_ssh_public_key }}"
+        mode: "0644"
+
+    - name: Write hive ssh client config (node-level Host aliases)
+      ansible.builtin.copy:
+        dest: "{{ hive_state_dir }}/ssh/config"
+        # Paths are IN-CONTAINER (/state/ssh/...) — read by the ssh client
+        # inside the hive container. ControlMaster/ControlPersist multiplex the
+        # many small execs of a deploy over one connection per node.
+        content: |
+          Host node-docker
+              HostName 192.168.0.159
+              User {{ hive_secrets.hive_node_user }}
+              IdentityFile /state/ssh/id_ed25519
+              StrictHostKeyChecking accept-new
+              ControlMaster auto
+              ControlPersist 10m
+
+          Host node-lt1
+              HostName 192.168.0.165
+              User {{ hive_secrets.hive_node_user }}
+              IdentityFile /state/ssh/id_ed25519
+              StrictHostKeyChecking accept-new
+              ControlMaster auto
+              ControlPersist 10m
+
+          Host node-lt2
+              HostName 192.168.0.166
+              User {{ hive_secrets.hive_node_user }}
+              IdentityFile /state/ssh/id_ed25519
+              StrictHostKeyChecking accept-new
+              ControlMaster auto
+              ControlPersist 10m
+        mode: "0644"
+
+    # The LXC is unprivileged but maps uid 1000 -> 1000, so chowning the host-side
+    # /state/ssh tree to 1000:1000 lets the in-container `hive` user (uid 1000)
+    # read the private key (which is 0600 = owner-only).
+    - name: Chown /state/ssh to the in-container hive uid (1000)
+      ansible.builtin.file:
+        path: "{{ hive_state_dir }}/ssh"
+        owner: "1000"
+        group: "1000"
+        recurse: true
+
+    # /state/projects stays EMPTY until /onboard-project registers the first
+    # project (Phase D); no project.yaml is created here.
+
+    # =========================================================
+    # traefik-kop sidecar + hive routing (override compose)
+    # =========================================================
+    # The hive LXC is a separate Docker host (like the laptops), so its web UI
+    # reaches Traefik via a traefik-kop sidecar that syncs labels -> Redis
+    # (.159:6379) -> Traefik. Written as docker-compose.override.yml, which:
+    #   - is gitignored in the hive repo (so the clone stays clean), and
+    #   - is auto-loaded by `docker compose up` (no explicit -f needed).
+    # It is written BEFORE the deploy task below so that first `up -d` picks it up.
+    #
+    # traefik-kop env mirrors 11-laptops.yml exactly (image, docker.sock:ro mount,
+    # REDIS_ADDR, BIND_IP, POLL_INTERVAL, restart). It reads the hive container's
+    # labels (added here via the override merge) and publishes the route to Redis
+    # with backend BIND_IP:4483 (192.168.0.167:4483 = the published host port), so
+    # Traefik on .159 reaches the hive container over the LAN.
+
+    - name: Write hive docker-compose.override.yml (traefik-kop + routing labels)
+      ansible.builtin.copy:
+        dest: "{{ hive_repo }}/docker-compose.override.yml"
+        content: |
+          # Managed by ansible (12-hive.yml). Gitignored in the hive repo;
+          # auto-loaded by `docker compose up`. Merges routing labels onto the
+          # hive service and adds the traefik-kop sidecar.
+          services:
+            hive:
+              # entrypoints=web (:80) explicitly — :80 carries the tinyauth
+              # forwardAuth, so the inbox (which has no auth of its own) is
+              # shielded. (Omitting it binds ALL entrypoints incl. web-noauth :81,
+              # which would expose the inbox unauthenticated; and the Redis/KV
+              # provider needs an explicit entrypoint to bind reliably.)
+              labels:
+                - "traefik.enable=true"
+                - "traefik.http.routers.hive.rule=Host(`hive.{{ hive_secrets.domain }}`)"
+                - "traefik.http.routers.hive.entrypoints=web"
+                - "traefik.http.services.hive.loadbalancer.server.port=4483"
+
+            traefik-kop:
+              image: ghcr.io/jittering/traefik-kop:latest
+              container_name: traefik-kop
+              restart: unless-stopped
+              volumes:
+                - /var/run/docker.sock:/var/run/docker.sock:ro
+              environment:
+                - REDIS_ADDR=192.168.0.159:6379
+                - BIND_IP=192.168.0.167
+                - POLL_INTERVAL=5
+        owner: root
+        group: root
+        mode: "0644"
+
+    # The container's hive user (uid 1000) must own everything it reads/writes:
+    # the clone (bun writes the lockfile + reads .env), /state (writes tasks/
+    # projects/settings), and ~/dev. Ansible created these as root; chown to 1000
+    # so start-hive.sh's bun install + .env load + /state writes work. Idempotent.
+    - name: Chown hive clone + state + dev to the in-container uid (1000)
+      ansible.builtin.command: chown -R 1000:1000 {{ hive_repo }} {{ hive_state_dir }} {{ hive_dev_dir }}
+      changed_when: false
+
+    # =========================================================
+    # Deploy: docker compose up -d  (the one core step that matters)
+    # =========================================================
+    # First boot builds the image (Dockerfile: claude + codex + bun installers),
+    # then start-hive.sh runs `bun install` into the hive-node-modules volume and
+    # launches the tmux `services` session (web on :4483 + loop). HOME=/root makes
+    # the repo's ${HOME}/... volume paths expand deterministically (see header).
+    # The override written above is auto-loaded here (traefik-kop + hive labels).
+
+    - name: Build and start the hive container
+      ansible.builtin.command:
+        cmd: docker compose up -d --build
+        chdir: "{{ hive_repo }}"
+      environment:
+        HOME: "{{ hive_home }}"
+      changed_when: true
+
+    - name: Wait for the hive web inbox to answer on :4483
+      ansible.builtin.uri:
+        url: http://127.0.0.1:4483/
+        status_code: [200, 302, 401]
+      register: hive_web_ready
+      retries: 18
+      delay: 10
+      until: hive_web_ready is not failed
+
+    - name: Show hive container status
+      ansible.builtin.command:
+        cmd: docker compose ps
+        chdir: "{{ hive_repo }}"
+      environment:
+        HOME: "{{ hive_home }}"
+      register: hive_ps
+      changed_when: false
+
+    - name: Show compose ps
+      ansible.builtin.debug:
+        var: hive_ps.stdout_lines
+
+    - name: Show post-deploy manual login reminder
+      ansible.builtin.debug:
+        msg:
+          - "hive container is up. Web inbox: http://192.168.0.167:4483/"
+          - "MANUAL: docker exec -it hive claude   (complete subscription login — no API key path)"
+          - "Auth persists on the hive-claude named volume across rebuilds."
+
+    # =========================================================
+    # hive-update host wrapper (git pull + recompose + tmux respawn)
+    # =========================================================
+    # Per hive docs/ssh-exec.md, after deploying a transport/code change the
+    # long-running loop/web tmux panes keep executing the pre-deploy code from
+    # memory and must be respawned (the load-bearing step "learned the hard way").
+
+    - name: Install hive-update wrapper
+      ansible.builtin.copy:
+        dest: /usr/local/bin/hive-update
+        owner: root
+        group: root
+        mode: "0755"
+        content: |
+          #!/bin/sh
+          set -eu
+          git -C /opt/hive pull --ff-only
+          # git pull (as root) lands new files root-owned; the container is uid 1000.
+          chown -R 1000:1000 /opt/hive
+          cd /opt/hive && HOME=/root docker compose up -d --build
+          docker exec hive tmux respawn-window -k -t services:loop
+          docker exec hive tmux respawn-window -k -t services:web
+
+# =============================================================
+# Play 3b: Project nodes — hive login user + from=-pinned key
+# =============================================================
+# Grants the hive cockpit SSH -> docker reach into each node per HIVE.md
+# "Docker access = Option A": a dedicated non-root login user in the `docker`
+# group, with the hive public key pinned to the hive host only.
+#
+# Mixed OS: .159 (docker_host) is Debian, the laptops are Alpine (musl, ash).
+# `ansible.builtin.user` works on both; `shell: /bin/sh` is Alpine-safe (no
+# /bin/bash by default on Alpine) and fine on Debian too. The `docker` group
+# already exists on all three nodes (Docker is installed).
+- name: Provision hive login user on project nodes
+  hosts: docker_host,laptop1,laptop2
+  gather_facts: false
+  tags: [hive, nodes, ssh]
+
+  vars:
+    hive_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/hive.sops.yml') | from_yaml }}"
+
+  pre_tasks:
+    - name: Wait for SSH connection
+      ansible.builtin.wait_for_connection:
+        timeout: 60
+
+  tasks:
+
+    - name: Create hive node login user (in docker group)
+      ansible.builtin.user:
+        name: "{{ hive_secrets.hive_node_user }}"
+        shell: /bin/sh
+        groups: docker
+        append: true
+        create_home: true
+        # '*' = no usable password but NOT locked. A locked account (default '!')
+        # is rejected by Alpine's sshd even for key auth ("account is locked"),
+        # which broke hive->laptop1/laptop2 SSH; Debian tolerates '!'. '*' works
+        # on both. Key-only access is enforced by authorized_keys below.
+        password: "*"
+        state: present
+
+    - name: Pin hive public key in the login user's authorized_keys
+      # from=-pinned to the hive host + restrict (no forwarding/pty) per
+      # hive docs/ssh-exec.md "Keys".
+      ansible.posix.authorized_key:
+        user: "{{ hive_secrets.hive_node_user }}"
+        key: "{{ hive_secrets.hive_ssh_public_key }}"
+        key_options: 'from="192.168.0.167",restrict'
+        state: present
+
+# =============================================================
+# Play 4: Verification
+# =============================================================
+- name: Verify hive deployment
+  hosts: proxmox
+  gather_facts: false
+  tags: [verify]
+
+  tasks:
+
+    - name: Show running LXCs
+      ansible.builtin.command: pct list
+      register: pct_list
+      changed_when: false
+
+    - name: Verify hive LXC 205 is running
+      ansible.builtin.assert:
+        that: "'205' in pct_list.stdout"
+        fail_msg: "LXC 205 (hive) is not in pct list"
+
+- name: Final checks on hive
+  hosts: hive
+  gather_facts: false
+  tags: [verify]
+
+  vars:
+    hive_repo: /opt/hive
+
+  tasks:
+
+    - name: Verify hive container is running
+      ansible.builtin.command: docker inspect -f '{{ "{{.State.Status}}" }}' hive
+      register: hive_state
+      changed_when: false
+
+    - name: Show hive container state
+      ansible.builtin.debug:
+        msg: "hive container: {{ hive_state.stdout }}"
+
+    - name: Verify web inbox answers on :4483
+      ansible.builtin.uri:
+        url: http://127.0.0.1:4483/
+        status_code: [200, 302, 401]
+      register: hive_web
+      retries: 6
+      delay: 10
+      until: hive_web is not failed
+
+    - name: Show web inbox check
+      ansible.builtin.debug:
+        msg: "hive web inbox: HTTP {{ hive_web.status }}"
+
+    - name: Check whether claude is logged in (manual step gate)
+      ansible.builtin.command: docker exec hive bash -lc 'test -s /home/hive/.claude/.credentials.json || test -f /home/hive/.claude.json'
+      register: claude_login_check
+      changed_when: false
+      failed_when: false
+
+    - name: Show claude login reminder
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'claude auth present on hive-claude volume.'
+             if claude_login_check.rc == 0
+             else 'MANUAL STEP PENDING: docker exec -it hive claude  (subscription login).' }}
+
+- name: Summary
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  tags: [verify]
+
+  tasks:
+    - name: Show deployment summary
+      ansible.builtin.debug:
+        msg:
+          - "=== Hive task-runner deployed (DRAFT) ==="
+          - "hive LXC 205: 192.168.0.167 (unprivileged, Docker, single 'hive' container)"
+          - "Web inbox: http://192.168.0.167:4483/"
+          - "Repo clone / compose dir: /opt/hive  (== /app bind mount)"
+          - "State: /root/hive/state -> /state (compose runs as root, HOME=/root)"
+          - ""
+          - "MANUAL post-deploy: docker exec -it hive claude   (subscription login)"
+          - ""
+          - "Wired up (task #7):"
+          - "  - /state/ssh keypair + node-level ssh/config (chowned to uid 1000)"
+          - "  - node project-login users + from=-pinned authorized_keys (.159/.165/.166)"
+          - "  - traefik-kop sidecar + cloudflared route for hive.<domain> behind tinyauth"
+          - "  - /usr/local/bin/hive-update wrapper (pull + recompose + tmux respawn)"
+          - ""
+          - "Phase D (later): /onboard-project seeds /state/projects/<slug>/project.yaml"
