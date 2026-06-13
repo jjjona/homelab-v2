@@ -290,28 +290,6 @@ services:
       web:
         ipv4_address: 172.20.0.16
 
-  linkding:
-    image: sissbruecker/linkding:latest
-    container_name: linkding
-    environment:
-      - LD_SUPERUSER_NAME=${LINKDING_SUPERUSER_NAME}
-      - LD_SUPERUSER_PASSWORD=${LINKDING_SUPERUSER_PASSWORD}
-      - LD_CSRF_TRUSTED_ORIGINS=https://links.${DOMAIN}
-      - LD_ENABLE_OIDC=${LINKDING_ENABLE_OIDC:-}
-      - LD_OIDC_CLIENT_ID=${LINKDING_OIDC_CLIENT_ID:-}
-      - LD_OIDC_CLIENT_SECRET=${LINKDING_OIDC_CLIENT_SECRET:-}
-      - LD_OIDC_PROVIDER_URL=https://auth.${DOMAIN}/.well-known/openid-configuration
-    volumes:
-      - /mnt/data/docker/linkding/data:/etc/linkding/data
-    restart: unless-stopped
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.linkding.rule=Host(`links.${DOMAIN}`)"
-      - "traefik.http.services.linkding.loadbalancer.server.port=9090"
-    networks:
-      web:
-        ipv4_address: 172.20.0.15
-
   forgejo:
     image: codeberg.org/forgejo/forgejo:9
     container_name: forgejo
@@ -556,4 +534,9 @@ networks:
     driver: bridge
     ipam:
       config:
+        # Static reservations live in .2-.127 (assigned explicitly per service).
+        # Auto-assigned IPs (containers without ipv4_address, incl. external
+        # joiners) are confined to .128+ so they can never collide with a
+        # reserved static address while its owner is briefly down.
         - subnet: 172.20.0.0/24
+          ip_range: 172.20.0.128/25

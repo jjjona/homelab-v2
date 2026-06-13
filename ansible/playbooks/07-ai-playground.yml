@@ -2,15 +2,13 @@
 # 07-ai-playground.yml
 # Creates the Jade Platform Foundation with two LXCs and Gitea integration:
 #   - Jade LXC 201 (.160): Bun + Claude Code + OpenCode CLI + git (runs as `jade` user)
-#   - Pandora LXC 202 (.161): Docker Engine + git + traefik-kop (sandbox node)
 #   - Gitea on existing docker-host compose stack (git.jnrm.eu, port 3000)
 #   - SSH-based git access to Gitea (port 2222) for jade user
 #   - MCP servers (jade-knowledge + jade-journal) for both Claude Code and OpenCode
 #   - Persona slash commands via jade-prompts repo
 #
-# 3-node architecture: Jade (.160) / Pandora (.161) / Docker Host (.159)
-# jade can SSH into Pandora and Docker Host, push/pull repos from Gitea via SSH.
-# traefik-kop on Pandora syncs Docker labels to Traefik via Redis.
+# 2-node architecture: Jade (.160) / Docker Host (.159)
+# jade can SSH into Docker Host, push/pull repos from Gitea via SSH.
 # Claude Code / OpenCode auth is manual (interactive login after deploy).
 #
 # Run with --tags destroy to tear down old LXCs first:
@@ -34,14 +32,9 @@
       ignore_errors: true
       changed_when: true
 
-    - name: Stop and destroy LXC 202 (pandora)
-      ansible.builtin.shell: pct stop 202 && pct destroy 202
-      ignore_errors: true
-      changed_when: true
-
     - name: Show destruction complete
       ansible.builtin.debug:
-        msg: "Old LXCs 201 + 202 destroyed. Re-run without --tags destroy to recreate."
+        msg: "Old LXC 201 destroyed. Re-run without --tags destroy to recreate."
 
 # =============================================================
 # Play 1: Proxmox — Create Jade LXC 201
@@ -66,129 +59,6 @@
     ct_mounts:
       - mp0: /mnt/nas/books-to-summarize,mp=/mnt/to-summarize
       - mp1: /mnt/nas/books,mp=/mnt/books
-    ssh_pubkey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFG9NoQSuVYiBD5fib0bN43e2UWwH5iEeDy99cCsHrHC"
-
-  tasks:
-
-    - name: Check if LXC {{ ct_id }} exists
-      ansible.builtin.command: pct status {{ ct_id }}
-      register: ct_check
-      ignore_errors: true
-      changed_when: false
-
-    - name: Skip if LXC {{ ct_id }} is already running
-      ansible.builtin.debug:
-        msg: "LXC {{ ct_id }} already exists ({{ ct_check.stdout | default('') }}), skipping creation"
-      when: ct_check.rc == 0
-
-    - name: Create LXC {{ ct_id }}
-      when: ct_check.rc != 0
-      block:
-
-        - name: Update container template index
-          ansible.builtin.command: pveam update
-          changed_when: false
-
-        - name: Download Debian CT template
-          ansible.builtin.command: >
-            pveam download {{ ct_template_storage }} {{ ct_template }}
-          register: template_download
-          changed_when: "'already exists' not in template_download.stdout"
-          failed_when:
-            - template_download.rc != 0
-            - "'already exists' not in template_download.stderr"
-
-        - name: Write SSH public key to temp file
-          ansible.builtin.copy:
-            dest: /tmp/ct-ssh-pubkey.pub
-            content: "{{ ssh_pubkey }}\n"
-            mode: "0600"
-
-        - name: Create LXC {{ ct_id }}
-          ansible.builtin.command: >
-            pct create {{ ct_id }}
-            {{ ct_template_storage }}:vztmpl/{{ ct_template }}
-            --hostname {{ ct_hostname }}
-            --unprivileged 1
-            --features nesting=1,keyctl=1
-            --rootfs local-lvm:{{ ct_rootfs_size }}
-            --memory {{ ct_memory }}
-            --swap {{ ct_swap }}
-            --cores {{ ct_cores }}
-            --net0 name=eth0,bridge=vmbr0,ip={{ ct_ip }}/24,gw={{ ct_gw }},firewall=0
-            --nameserver 1.1.1.1
-            --onboot 1
-            --start 0
-            --ssh-public-keys /tmp/ct-ssh-pubkey.pub
-
-        - name: Add FUSE device passthrough for LXC {{ ct_id }}
-          ansible.builtin.blockinfile:
-            path: "/etc/pve/lxc/{{ ct_id }}.conf"
-            block: |
-              lxc.mount.entry: /dev/fuse dev/fuse none bind,create=file 0 0
-              lxc.cgroup2.devices.allow: c 10:229 rwm
-            marker: "# {mark} ANSIBLE MANAGED - FUSE"
-          when: ct_fuse | default(false)
-
-        - name: Add NAS bind mounts for LXC {{ ct_id }}
-          ansible.builtin.command: >
-            pct set {{ ct_id }}
-            -mp0 {{ ct_mounts[0].mp0 }}
-            -mp1 {{ ct_mounts[1].mp1 }}
-          when: ct_mounts is defined
-
-        - name: Start LXC {{ ct_id }}
-          ansible.builtin.command: pct start {{ ct_id }}
-
-        - name: Wait for LXC systemd to be ready
-          ansible.builtin.command: pct exec {{ ct_id }} -- systemctl is-system-running --wait
-          register: systemd_ready
-          retries: 12
-          delay: 5
-          until: systemd_ready.rc == 0 or (systemd_ready.stdout is defined and 'running' in systemd_ready.stdout)
-          changed_when: false
-
-        - name: Remove temp SSH key file
-          ansible.builtin.file:
-            path: /tmp/ct-ssh-pubkey.pub
-            state: absent
-
-    - name: Ensure LXC {{ ct_id }} is started
-      ansible.builtin.command: pct start {{ ct_id }}
-      register: start_result
-      failed_when:
-        - start_result.rc != 0
-        - "'already running' not in start_result.stderr"
-      changed_when: start_result.rc == 0
-
-    - name: Verify LXC {{ ct_id }} status
-      ansible.builtin.command: pct status {{ ct_id }}
-      register: ct_status
-      changed_when: false
-
-    - name: Show LXC {{ ct_id }} status
-      ansible.builtin.debug:
-        var: ct_status.stdout
-
-# =============================================================
-# Play 2: Proxmox — Create Pandora LXC 202
-# =============================================================
-- name: Create Pandora LXC
-  hosts: proxmox
-  gather_facts: false
-  tags: [create, pandora]
-
-  vars:
-    ct_id: 202
-    ct_hostname: pandora
-    ct_ip: 192.168.0.161
-    ct_gw: 192.168.0.1
-    ct_memory: 8192
-    ct_swap: 2048
-    ct_cores: 4
-    ct_rootfs_size: 50
-    ct_template: debian-12-standard_12.12-1_amd64.tar.zst
-    ct_template_storage: local
     ssh_pubkey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFG9NoQSuVYiBD5fib0bN43e2UWwH5iEeDy99cCsHrHC"
 
   tasks:
@@ -360,14 +230,6 @@
         group: root
         mode: "0440"
 
-    - name: Create /mnt/workspaces for jade
-      ansible.builtin.file:
-        path: /mnt/workspaces
-        state: directory
-        owner: jade
-        group: jade
-        mode: "0755"
-
     - name: Create jade .ssh directory
       ansible.builtin.file:
         path: /home/jade/.ssh
@@ -529,14 +391,6 @@
 
     # --- SSH keys ---
 
-    - name: Generate SSH key for Pandora access
-      ansible.builtin.command: >
-        ssh-keygen -t ed25519 -f /home/jade/.ssh/jade_pandora_ed25519 -N "" -C "jade@jade-lxc"
-      args:
-        creates: /home/jade/.ssh/jade_pandora_ed25519
-      become: true
-      become_user: jade
-
     - name: Generate SSH key for Docker host / Live access
       ansible.builtin.command: >
         ssh-keygen -t ed25519 -f /home/jade/.ssh/jade_docker_ed25519 -N "" -C "jade@jade-lxc-docker"
@@ -559,8 +413,6 @@
         owner: jade
         group: jade
       loop:
-        - /home/jade/.ssh/jade_pandora_ed25519
-        - /home/jade/.ssh/jade_pandora_ed25519.pub
         - /home/jade/.ssh/jade_docker_ed25519
         - /home/jade/.ssh/jade_docker_ed25519.pub
         - /home/jade/.ssh/jade_gitea_ed25519
@@ -572,13 +424,6 @@
       ansible.builtin.copy:
         dest: /home/jade/.ssh/config
         content: |
-          Host pandora
-              HostName 192.168.0.161
-              User root
-              IdentityFile ~/.ssh/jade_pandora_ed25519
-              StrictHostKeyChecking no
-              UserKnownHostsFile /dev/null
-
           Host live
               HostName 192.168.0.159
               User root
@@ -597,50 +442,7 @@
         group: jade
         mode: "0600"
 
-    # --- SSHFS mount for Pandora workspaces ---
-
-    - name: Create sshfs mount systemd service
-      ansible.builtin.copy:
-        dest: /etc/systemd/system/mnt-workspaces.service
-        content: |
-          [Unit]
-          Description=SSHFS mount pandora:/opt/workspaces
-          After=network-online.target
-          Wants=network-online.target
-
-          [Service]
-          Type=forking
-          User=jade
-          ExecStart=/usr/bin/sshfs root@pandora:/opt/workspaces /mnt/workspaces -o IdentityFile=/home/jade/.ssh/jade_pandora_ed25519,allow_other,reconnect,ServerAliveInterval=15,StrictHostKeyChecking=no,UserKnownHostsFile=/dev/null
-          ExecStop=/usr/bin/fusermount3 -u /mnt/workspaces
-          Restart=on-failure
-          RestartSec=10
-
-          [Install]
-          WantedBy=multi-user.target
-        owner: root
-        group: root
-        mode: "0644"
-
-    - name: Enable and start sshfs mount service
-      ansible.builtin.systemd:
-        name: mnt-workspaces.service
-        enabled: true
-        state: started
-        daemon_reload: true
-
     # --- Store SSH public keys as facts for other plays ---
-
-    - name: Read jade Pandora public key
-      ansible.builtin.slurp:
-        src: /home/jade/.ssh/jade_pandora_ed25519.pub
-      register: jade_pandora_pubkey
-
-    - name: Store jade Pandora public key as fact
-      ansible.builtin.set_fact:
-        jade_pandora_ssh_pubkey: "{{ jade_pandora_pubkey.content | b64decode | trim }}"
-      delegate_to: localhost
-      delegate_facts: true
 
     - name: Read jade Docker host public key
       ansible.builtin.slurp:
@@ -683,277 +485,6 @@
       become: true
       become_user: jade
       changed_when: false
-
-# =============================================================
-# Play 4: Pandora LXC — Install Docker + traefik-kop + git
-# =============================================================
-- name: Install Docker on Pandora LXC
-  hosts: pandora
-  gather_facts: false
-  tags: [pandora, docker]
-
-  vars:
-    ai_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/ai-playground.sops.yml') | from_yaml }}"
-
-  tasks:
-
-    - name: Wait for SSH connection
-      ansible.builtin.wait_for_connection:
-        timeout: 60
-
-    - name: Gather facts
-      ansible.builtin.setup:
-
-    # --- Base packages ---
-
-    - name: Install base packages
-      ansible.builtin.apt:
-        name:
-          - git
-          - curl
-          - jq
-          - ca-certificates
-          - gnupg
-          - python3
-        state: present
-        update_cache: true
-
-    # --- Authorize Jade's SSH key ---
-
-    - name: Add Jade's SSH key to authorized_keys
-      ansible.posix.authorized_key:
-        user: root
-        key: "{{ hostvars['localhost']['jade_pandora_ssh_pubkey'] }}"
-        state: present
-
-    # --- Docker official repo ---
-
-    - name: Create keyrings directory
-      ansible.builtin.file:
-        path: /etc/apt/keyrings
-        state: directory
-        mode: "0755"
-
-    - name: Download Docker GPG key
-      ansible.builtin.get_url:
-        url: https://download.docker.com/linux/debian/gpg
-        dest: /etc/apt/keyrings/docker.asc
-        mode: "0644"
-
-    - name: Add Docker apt repository
-      ansible.builtin.copy:
-        dest: /etc/apt/sources.list.d/docker.list
-        content: >
-          deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc]
-          https://download.docker.com/linux/debian
-          {{ ansible_facts['distribution_release'] }} stable
-        mode: "0644"
-
-    # --- Install Docker ---
-
-    - name: Install Docker Engine
-      ansible.builtin.apt:
-        name:
-          - docker-ce
-          - docker-ce-cli
-          - containerd.io
-          - docker-buildx-plugin
-          - docker-compose-plugin
-        state: present
-        update_cache: true
-
-    # --- Configure Docker daemon ---
-
-    - name: Configure Docker daemon
-      ansible.builtin.copy:
-        dest: /etc/docker/daemon.json
-        content: |
-          {
-            "storage-driver": "overlay2",
-            "log-driver": "json-file",
-            "log-opts": {
-              "max-size": "10m",
-              "max-file": "3"
-            },
-            "insecure-registries": ["192.168.0.159:3000"]
-          }
-        owner: root
-        group: root
-        mode: "0644"
-      notify: restart docker
-
-    # --- Enable services ---
-
-    - name: Enable Docker and containerd
-      ansible.builtin.systemd:
-        name: "{{ item }}"
-        enabled: true
-        state: started
-      loop:
-        - docker
-        - containerd
-
-    # --- Deploy traefik-kop ---
-
-    - name: Create traefik-kop directory
-      ansible.builtin.file:
-        path: /opt/traefik-kop
-        state: directory
-        owner: root
-        group: root
-        mode: "0755"
-
-    - name: Write traefik-kop docker-compose.yml
-      ansible.builtin.copy:
-        dest: /opt/traefik-kop/docker-compose.yml
-        content: |
-          services:
-            traefik-kop:
-              image: ghcr.io/jittering/traefik-kop:latest
-              container_name: traefik-kop
-              restart: unless-stopped
-              volumes:
-                - /var/run/docker.sock:/var/run/docker.sock:ro
-              environment:
-                - REDIS_ADDR=192.168.0.159:6379
-                - BIND_IP=192.168.0.161
-                - POLL_INTERVAL=5
-        owner: root
-        group: root
-        mode: "0644"
-
-    - name: Pull traefik-kop image
-      ansible.builtin.command:
-        cmd: docker compose pull
-        chdir: /opt/traefik-kop
-      changed_when: true
-
-    - name: Start traefik-kop
-      ansible.builtin.command:
-        cmd: docker compose up -d
-        chdir: /opt/traefik-kop
-      changed_when: true
-
-    # --- Workspaces foundation ---
-
-    - name: Create workspaces directory
-      ansible.builtin.file:
-        path: /opt/workspaces
-        state: directory
-        owner: root
-        group: root
-        mode: "0755"
-
-    # --- Gitea SSH key for Pandora ---
-
-    - name: Create Pandora .ssh directory
-      ansible.builtin.file:
-        path: /root/.ssh
-        state: directory
-        owner: root
-        group: root
-        mode: "0700"
-
-    - name: Generate SSH key for Gitea access on Pandora
-      ansible.builtin.command: >
-        ssh-keygen -t ed25519 -f /root/.ssh/pandora_gitea_ed25519 -N "" -C "pandora@pandora-lxc-gitea"
-      args:
-        creates: /root/.ssh/pandora_gitea_ed25519
-
-    - name: Read Pandora Gitea public key
-      ansible.builtin.slurp:
-        src: /root/.ssh/pandora_gitea_ed25519.pub
-      register: pandora_gitea_pubkey
-
-    - name: Store Pandora Gitea public key as fact
-      ansible.builtin.set_fact:
-        pandora_gitea_ssh_pubkey: "{{ pandora_gitea_pubkey.content | b64decode | trim }}"
-      delegate_to: localhost
-      delegate_facts: true
-
-    - name: Write SSH config for Gitea
-      ansible.builtin.copy:
-        dest: /root/.ssh/config
-        content: |
-          Host gitea
-              HostName 192.168.0.159
-              Port 2222
-              User git
-              IdentityFile ~/.ssh/pandora_gitea_ed25519
-              StrictHostKeyChecking no
-              UserKnownHostsFile /dev/null
-        owner: root
-        group: root
-        mode: "0600"
-
-    # --- Git config ---
-
-    - name: Configure git user name
-      ansible.builtin.command: git config --global user.name jade
-      changed_when: false
-
-    - name: Configure git user email
-      ansible.builtin.command: git config --global user.email jade@jnrm.eu
-      changed_when: false
-
-    - name: Configure git SSH rewrite for Gitea
-      ansible.builtin.command: git config --global url."git@gitea:jade/".insteadOf "https://git.jnrm.eu/jade/"
-      changed_when: false
-
-    # --- Verify ---
-
-    - name: Check Docker version
-      ansible.builtin.command: docker version
-      register: docker_version
-      changed_when: false
-
-    - name: Show Docker version
-      ansible.builtin.debug:
-        var: docker_version.stdout_lines
-
-    - name: Check Compose version
-      ansible.builtin.command: docker compose version
-      register: compose_version
-      changed_when: false
-
-    - name: Show Compose version
-      ansible.builtin.debug:
-        var: compose_version.stdout
-
-    - name: Run hello-world test
-      ansible.builtin.command: docker run --rm hello-world
-      register: hello_world
-      changed_when: false
-
-    - name: Show hello-world output
-      ansible.builtin.debug:
-        var: hello_world.stdout_lines
-
-    - name: Check traefik-kop status
-      ansible.builtin.command:
-        cmd: docker compose ps
-        chdir: /opt/traefik-kop
-      register: kop_status
-      changed_when: false
-
-    - name: Show traefik-kop status
-      ansible.builtin.debug:
-        var: kop_status.stdout_lines
-
-    # --- Docker registry login ---
-
-    - name: Login to Gitea container registry
-      ansible.builtin.shell:
-        cmd: echo '{{ ai_secrets.gitea_jade_password }}' | docker login 192.168.0.159:3000 -u {{ ai_secrets.gitea_jade_user }} --password-stdin
-      no_log: true
-      changed_when: true
-
-  handlers:
-    - name: restart docker
-      ansible.builtin.systemd:
-        name: docker
-        state: restarted
-
 
 # =============================================================
 # Play 5: Docker host — Deploy Gitea + create users + authorize SSH
@@ -1140,35 +671,6 @@
         status_code: [201]
       no_log: true
 
-    # --- Register Pandora's SSH key with Gitea ---
-
-    - name: Delete old pandora-lxc SSH key
-      ansible.builtin.uri:
-        url: "http://127.0.0.1:3000/api/v1/user/keys/{{ item.id }}"
-        method: DELETE
-        headers:
-          Authorization: "token {{ hostvars['localhost']['jade_gitea_token'] }}"
-        status_code: [204]
-      loop: "{{ gitea_ssh_keys.json | selectattr('title', 'equalto', 'pandora-lxc') | list }}"
-      loop_control:
-        label: "{{ item.title }}"
-      no_log: true
-      when: gitea_ssh_keys.json | selectattr('title', 'equalto', 'pandora-lxc') | list | length > 0
-
-    - name: Register Pandora's SSH key with Gitea
-      ansible.builtin.uri:
-        url: "http://127.0.0.1:3000/api/v1/user/keys"
-        method: POST
-        headers:
-          Authorization: "token {{ hostvars['localhost']['jade_gitea_token'] }}"
-          Content-Type: "application/json"
-        body_format: json
-        body:
-          title: "pandora-lxc"
-          key: "{{ hostvars['localhost']['pandora_gitea_ssh_pubkey'] }}"
-        status_code: [201]
-      no_log: true
-
     # --- Authorize Jade's SSH key for Docker host ---
 
     - name: Add Jade's Docker host SSH key to authorized_keys
@@ -1203,7 +705,7 @@
         msg: "Gitea via Traefik: HTTP {{ gitea_traefik_check.status }} (401 = tinyauth protecting, expected)"
 
 # =============================================================
-# Play 6: Jade + Pandora — Git credentials + repos
+# Play 6: Jade — Git credentials + repos
 # =============================================================
 - name: Configure git on Jade LXC
   hosts: jade
@@ -1231,19 +733,6 @@
         group: jade
         mode: "0600"
       no_log: true
-
-    # --- Verify SSH to Pandora and Live ---
-
-    - name: Verify SSH from Jade to Pandora
-      ansible.builtin.command: ssh pandora whoami
-      become: true
-      become_user: jade
-      register: ssh_pandora_test
-      changed_when: false
-
-    - name: Show Pandora SSH test result
-      ansible.builtin.debug:
-        msg: "SSH Jade → Pandora: {{ ssh_pandora_test.stdout }}"
 
     - name: Verify SSH from Jade to Live
       ansible.builtin.command: ssh live whoami
@@ -1348,31 +837,6 @@
       ansible.builtin.debug:
         msg: "{{ 'CLAUDE.md written from jade-seed.md' if jade_soul_clone is succeeded else 'jade-soul clone failed (repo may not exist yet) — copy jade-seed.md manually after backup restore' }}"
 
-- name: Configure git on Pandora LXC
-  hosts: pandora
-  gather_facts: false
-  tags: [git, pandora]
-
-  vars:
-    ai_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/ai-playground.sops.yml') | from_yaml }}"
-
-  tasks:
-
-    # --- HTTP token backup for Gitea API access ---
-
-    - name: Configure git credential helper
-      ansible.builtin.command: git config --global credential.helper store
-      changed_when: false
-
-    - name: Write git credentials file (HTTP backup)
-      ansible.builtin.copy:
-        dest: /root/.git-credentials
-        content: "http://{{ ai_secrets.gitea_jade_user }}:{{ hostvars['localhost']['jade_gitea_token'] }}@192.168.0.159:3000\n"
-        owner: root
-        group: root
-        mode: "0600"
-      no_log: true
-
 # =============================================================
 # Play 7: Verification
 # =============================================================
@@ -1396,11 +860,6 @@
       ansible.builtin.assert:
         that: "'201' in pct_list.stdout"
         fail_msg: "LXC 201 (jade) is not in pct list"
-
-    - name: Verify Pandora LXC 202 is running
-      ansible.builtin.assert:
-        that: "'202' in pct_list.stdout"
-        fail_msg: "LXC 202 (pandora) is not in pct list"
 
 - name: Final checks on Jade
   hosts: jade
@@ -1498,52 +957,6 @@
       ansible.builtin.debug:
         msg: "Git SSH: {{ git_ssh_test.stderr | default(git_ssh_test.stdout) }}"
 
-- name: Final checks on Pandora
-  hosts: pandora
-  gather_facts: false
-  tags: [verify]
-
-  tasks:
-
-    - name: Verify Docker on Pandora
-      ansible.builtin.command: docker version --format "Docker {{ '{{' }}.Server.Version{{ '}}' }}"
-      register: docker_ver
-      changed_when: false
-
-    - name: Show Docker version
-      ansible.builtin.debug:
-        msg: "Pandora Docker: {{ docker_ver.stdout }}"
-
-    - name: Verify traefik-kop is running
-      ansible.builtin.command:
-        cmd: docker compose ps --format json
-        chdir: /opt/traefik-kop
-      register: kop_check
-      changed_when: false
-
-    - name: Show traefik-kop status
-      ansible.builtin.debug:
-        var: kop_check.stdout_lines
-
-    - name: Verify Pandora git SSH access to Gitea
-      ansible.builtin.command: ssh gitea -T
-      register: pandora_git_test
-      changed_when: false
-      ignore_errors: true
-
-    - name: Show Pandora git SSH result
-      ansible.builtin.debug:
-        msg: "Pandora Git SSH: {{ pandora_git_test.stderr | default(pandora_git_test.stdout) }}"
-
-    - name: Verify workspaces directory
-      ansible.builtin.stat:
-        path: /opt/workspaces
-      register: workspaces_stat
-
-    - name: Show workspaces status
-      ansible.builtin.debug:
-        msg: "{{ '/opt/workspaces exists' if workspaces_stat.stat.exists else '/opt/workspaces missing!' }}"
-
 - name: Summary
   hosts: localhost
   gather_facts: false
@@ -1556,14 +969,12 @@
         msg:
           - "=== Jade Platform Foundation Deployed ==="
           - "Jade LXC 201: 192.168.0.160 (Bun + Claude Code + OpenCode as 'jade' user)"
-          - "Pandora LXC 202: 192.168.0.161 (Docker + traefik-kop + workspaces)"
           - "Gitea: http://192.168.0.159:3000 (git.jnrm.eu, SSH port 2222)"
-          - "SSH: jade → pandora (.161), jade → live (.159), jade → gitea (SSH)"
+          - "SSH: jade → live (.159), jade → gitea (SSH)"
           - "MCP: jade-knowledge + jade-journal on both Claude Code and OpenCode"
           - ""
-          - "3-Node Architecture:"
+          - "2-Node Architecture:"
           - "  Jade (.160)   = brain (Claude Code + OpenCode)"
-          - "  Pandora (.161) = sandbox (Docker workspaces)"
           - "  Live (.159)    = production (Traefik + services)"
           - ""
           - "Next steps:"
