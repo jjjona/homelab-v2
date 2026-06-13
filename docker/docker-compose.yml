@@ -295,13 +295,19 @@ services:
     container_name: forgejo
     ports:
       - "0.0.0.0:3001:3000"
+      # 2222 = canonical git SSH (inherited from retired Gitea); 2223 kept for any
+      # legacy clients during transition.
+      - "0.0.0.0:2222:22"
       - "0.0.0.0:2223:22"
     environment:
       - USER_UID=1000
       - USER_GID=1000
-      - FORGEJO__server__ROOT_URL=https://gitarchive.${DOMAIN}
-      - FORGEJO__server__SSH_DOMAIN=192.168.0.159
-      - FORGEJO__server__SSH_PORT=2223
+      # ROOT_URL is the raw LAN IP (not git.${DOMAIN}) so the container registry's
+      # bearer-token realm stays LAN-internal — same pattern Gitea used. The
+      # friendly git.${DOMAIN} web UI is served via the Traefik labels below.
+      - FORGEJO__server__ROOT_URL=http://192.168.0.159:3001
+      - FORGEJO__server__SSH_DOMAIN=git.${DOMAIN}
+      - FORGEJO__server__SSH_PORT=2222
       - FORGEJO__security__INSTALL_LOCK=true
       - FORGEJO__service__DISABLE_REGISTRATION=false
       - FORGEJO__service__ALLOW_ONLY_EXTERNAL_REGISTRATION=true
@@ -314,42 +320,21 @@ services:
     env_file: .env
     restart: unless-stopped
     labels:
+      # git.${DOMAIN} is the primary host (Forgejo is now the primary git server).
+      # web-noauth entrypoint (:81) keeps git CLI / HTTP off the tinyauth forwardAuth;
+      # the web UI is protected by Forgejo's own login + PocketID OIDC.
       - "traefik.enable=true"
-      - "traefik.http.routers.forgejo.rule=Host(`gitarchive.${DOMAIN}`)"
+      - "traefik.http.routers.forgejo.rule=Host(`git.${DOMAIN}`)"
+      - "traefik.http.routers.forgejo.entrypoints=web-noauth"
       - "traefik.http.routers.forgejo.service=forgejo"
-      - "traefik.http.routers.forgejo-registry.rule=Host(`gitarchive.${DOMAIN}`) && PathPrefix(`/v2/`)"
-      - "traefik.http.routers.forgejo-registry.service=forgejo"
       - "traefik.http.services.forgejo.loadbalancer.server.port=3000"
     networks:
       web:
         ipv4_address: 172.20.0.21
 
-  gitea:
-    image: gitea/gitea:1
-    container_name: gitea
-    ports:
-      - "0.0.0.0:3000:3000"
-      - "0.0.0.0:2222:22"
-    environment:
-      - USER_UID=1000
-      - USER_GID=1000
-      - GITEA__server__ROOT_URL=http://192.168.0.159:3000
-      - GITEA__server__SSH_DOMAIN=192.168.0.159
-      - GITEA__server__SSH_PORT=2222
-      - GITEA__security__INSTALL_LOCK=true
-      - GITEA__packages__ENABLED=true
-    volumes:
-      - /mnt/data/docker/gitea/data:/data
-    env_file: .env
-    restart: unless-stopped
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.gitea.rule=Host(`git.${DOMAIN}`)"
-      - "traefik.http.routers.gitea.service=gitea"
-      - "traefik.http.services.gitea.loadbalancer.server.port=3000"
-    networks:
-      web:
-        ipv4_address: 172.20.0.24
+  # gitea — RETIRED 2026-06-13. Forgejo is now the primary git server (git.${DOMAIN}).
+  # All 6 keeper repos + the container registry were migrated to Forgejo; data dir
+  # /mnt/data/docker/gitea/data is preserved + backed up (_premigration-backup tar).
 
   # --- VPN (Gluetun) ---
 

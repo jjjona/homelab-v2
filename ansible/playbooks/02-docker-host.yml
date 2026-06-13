@@ -313,6 +313,11 @@
 
     # --- Configure Docker daemon ---
 
+    # NOTE (2026-06-13): insecure-registries points at Forgejo's registry
+    # (192.168.0.159:3001). Gitea (was :3000) is retired — Forgejo is now the
+    # primary git server. This change will NOT take effect on the live host
+    # until docker is next restarted (intentionally deferred to avoid prod
+    # disruption).
     - name: Configure Docker daemon
       ansible.builtin.copy:
         dest: /etc/docker/daemon.json
@@ -323,7 +328,8 @@
             "log-opts": {
               "max-size": "10m",
               "max-file": "3"
-            }
+            },
+            "insecure-registries": ["192.168.0.159:3001"]
           }
         owner: root
         group: root

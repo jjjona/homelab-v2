@@ -1,21 +1,24 @@
 ---
 # 07-ai-playground.yml
-# Creates the Jade Platform Foundation with two LXCs and Gitea integration:
+# Creates the Jade Platform Foundation:
 #   - Jade LXC 201 (.160): Bun + Claude Code + OpenCode CLI + git (runs as `jade` user)
-#   - Gitea on existing docker-host compose stack (git.jnrm.eu, port 3000)
-#   - SSH-based git access to Gitea (port 2222) for jade user
 #   - MCP servers (jade-knowledge + jade-journal) for both Claude Code and OpenCode
 #   - Persona slash commands via jade-prompts repo
 #
+# NOTE: Gitea deployment was removed 2026-06-13 (was Play 5) — Forgejo is now
+# the primary git server (defined in docker/docker-compose.yml +
+# 03-core-services.yml). The jade plays below still reference a `gitea` ssh
+# alias + git HTTP token; those are removed when jade is retired in the hive
+# Phase C work — do not re-run 07 standalone until then.
+#
 # 2-node architecture: Jade (.160) / Docker Host (.159)
-# jade can SSH into Docker Host, push/pull repos from Gitea via SSH.
+# jade can SSH into Docker Host (.159) for live access.
 # Claude Code / OpenCode auth is manual (interactive login after deploy).
 #
 # Run with --tags destroy to tear down old LXCs first:
 #   ansible-playbook playbooks/07-ai-playground.yml --tags destroy
 #
-# Safe to re-run: LXC creation skips if already running,
-# Gitea user creation skips if users exist.
+# Safe to re-run: LXC creation skips if already running.
 
 # =============================================================
 # Play 0: Destroy old LXCs (only with --tags destroy)
@@ -487,222 +490,13 @@
       changed_when: false
 
 # =============================================================
-# Play 5: Docker host — Deploy Gitea + create users + authorize SSH
+# Play 5: REMOVED — Gitea retired 2026-06-13
 # =============================================================
-- name: Deploy Gitea and configure Docker host
-  hosts: docker_host
-  gather_facts: false
-  tags: [gitea]
-
-  vars:
-    project_dir: /mnt/data/docker/core
-    secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../../docker/secrets.sops.yml') | from_yaml }}"
-    ai_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/ai-playground.sops.yml') | from_yaml }}"
-
-  pre_tasks:
-    - name: Wait for SSH connection
-      ansible.builtin.wait_for_connection:
-        timeout: 60
-
-  tasks:
-
-    # --- Create Gitea data directory ---
-
-    - name: Create Gitea data directory
-      ansible.builtin.file:
-        path: /mnt/data/docker/gitea/data
-        state: directory
-        owner: "1000"
-        group: "1000"
-        mode: "0755"
-
-    # --- Copy updated compose ---
-
-    - name: Copy docker-compose.yml
-      ansible.builtin.copy:
-        src: "{{ playbook_dir }}/../../docker/docker-compose.yml"
-        dest: "{{ project_dir }}/docker-compose.yml"
-        owner: root
-        group: root
-        mode: "0644"
-
-    # --- Deploy Gitea ---
-
-    - name: Pull Gitea image
-      ansible.builtin.command:
-        cmd: docker compose pull gitea
-        chdir: "{{ project_dir }}"
-      changed_when: true
-
-    - name: Start Gitea container
-      ansible.builtin.command:
-        cmd: docker compose up -d gitea
-        chdir: "{{ project_dir }}"
-      changed_when: true
-
-    # --- Wait for Gitea ---
-
-    - name: Wait for Gitea to be ready
-      ansible.builtin.uri:
-        url: http://127.0.0.1:3000
-        status_code: [200, 302]
-      register: gitea_ready
-      retries: 12
-      delay: 10
-      until: gitea_ready is not failed
-
-    - name: Show Gitea status
-      ansible.builtin.debug:
-        msg: "Gitea is up (HTTP {{ gitea_ready.status }})"
-
-    # --- Create admin user (jjjona) ---
-
-    - name: Check existing Gitea users
-      ansible.builtin.command:
-        cmd: docker exec --user 1000 gitea gitea admin user list
-      register: gitea_users
-      changed_when: false
-
-    - name: Create Gitea admin user (jjjona)
-      ansible.builtin.command:
-        cmd: >
-          docker exec --user 1000 gitea gitea admin user create
-          --username {{ ai_secrets.gitea_admin_user }}
-          --password {{ ai_secrets.gitea_admin_password }}
-          --email {{ ai_secrets.gitea_admin_email }}
-          --admin
-          --must-change-password=false
-      when: ai_secrets.gitea_admin_user not in gitea_users.stdout
-      no_log: true
-
-    # --- Create jade user ---
-
-    - name: Create Gitea jade user
-      ansible.builtin.command:
-        cmd: >
-          docker exec --user 1000 gitea gitea admin user create
-          --username {{ ai_secrets.gitea_jade_user }}
-          --password {{ ai_secrets.gitea_jade_password }}
-          --email {{ ai_secrets.gitea_jade_email }}
-          --must-change-password=false
-      when: ai_secrets.gitea_jade_user not in gitea_users.stdout
-      no_log: true
-
-    # --- Generate Gitea access token for jade (API access) ---
-
-    - name: Check existing Gitea tokens
-      ansible.builtin.uri:
-        url: "http://127.0.0.1:3000/api/v1/users/{{ ai_secrets.gitea_jade_user }}/tokens"
-        method: GET
-        user: "{{ ai_secrets.gitea_jade_user }}"
-        password: "{{ ai_secrets.gitea_jade_password }}"
-        force_basic_auth: true
-        status_code: [200]
-      register: gitea_existing_tokens
-      no_log: true
-
-    - name: Delete old jade-api token if present
-      ansible.builtin.uri:
-        url: "http://127.0.0.1:3000/api/v1/users/{{ ai_secrets.gitea_jade_user }}/tokens/{{ item.id }}"
-        method: DELETE
-        user: "{{ ai_secrets.gitea_jade_user }}"
-        password: "{{ ai_secrets.gitea_jade_password }}"
-        force_basic_auth: true
-        status_code: [204]
-      loop: "{{ gitea_existing_tokens.json | selectattr('name', 'equalto', 'jade-api') | list }}"
-      loop_control:
-        label: "{{ item.name }}"
-      no_log: true
-
-    - name: Generate fresh Gitea access token for jade
-      ansible.builtin.command:
-        cmd: >
-          docker exec --user 1000 gitea gitea admin user generate-access-token
-          --username {{ ai_secrets.gitea_jade_user }}
-          --token-name jade-api
-          --scopes all
-          --raw
-      register: jade_gitea_token_result
-      no_log: true
-
-    - name: Store jade Gitea token as fact
-      ansible.builtin.set_fact:
-        jade_gitea_token: "{{ jade_gitea_token_result.stdout | trim }}"
-      delegate_to: localhost
-      delegate_facts: true
-      no_log: true
-
-    # --- Register Jade's SSH key with Gitea ---
-
-    - name: List existing SSH keys in Gitea
-      ansible.builtin.uri:
-        url: "http://127.0.0.1:3000/api/v1/user/keys"
-        method: GET
-        headers:
-          Authorization: "token {{ hostvars['localhost']['jade_gitea_token'] }}"
-        status_code: [200]
-      register: gitea_ssh_keys
-      no_log: true
-
-    - name: Delete old jade-lxc SSH key
-      ansible.builtin.uri:
-        url: "http://127.0.0.1:3000/api/v1/user/keys/{{ item.id }}"
-        method: DELETE
-        headers:
-          Authorization: "token {{ hostvars['localhost']['jade_gitea_token'] }}"
-        status_code: [204]
-      loop: "{{ gitea_ssh_keys.json | selectattr('title', 'equalto', 'jade-lxc') | list }}"
-      loop_control:
-        label: "{{ item.title }}"
-      no_log: true
-      when: gitea_ssh_keys.json | selectattr('title', 'equalto', 'jade-lxc') | list | length > 0
-
-    - name: Register Jade's SSH key with Gitea
-      ansible.builtin.uri:
-        url: "http://127.0.0.1:3000/api/v1/user/keys"
-        method: POST
-        headers:
-          Authorization: "token {{ hostvars['localhost']['jade_gitea_token'] }}"
-          Content-Type: "application/json"
-        body_format: json
-        body:
-          title: "jade-lxc"
-          key: "{{ hostvars['localhost']['jade_gitea_ssh_pubkey'] }}"
-        status_code: [201]
-      no_log: true
-
-    # --- Authorize Jade's SSH key for Docker host ---
-
-    - name: Add Jade's Docker host SSH key to authorized_keys
-      ansible.posix.authorized_key:
-        user: root
-        key: "{{ hostvars['localhost']['jade_docker_ssh_pubkey'] }}"
-        state: present
-
-    # --- Docker registry login ---
-
-    - name: Login to Gitea container registry on Docker host
-      ansible.builtin.shell:
-        cmd: echo '{{ ai_secrets.gitea_jade_password }}' | docker login 192.168.0.159:3000 -u {{ ai_secrets.gitea_jade_user }} --password-stdin
-      no_log: true
-      changed_when: true
-
-    # --- Verify Gitea via Traefik ---
-
-    - name: Verify Gitea via Traefik
-      ansible.builtin.uri:
-        url: "http://localhost:80/"
-        headers:
-          Host: "git.{{ secrets.domain }}"
-        status_code: [200, 302, 401]
-      register: gitea_traefik_check
-      retries: 3
-      delay: 5
-      until: gitea_traefik_check is not failed
-
-    - name: Show Gitea via Traefik result
-      ansible.builtin.debug:
-        msg: "Gitea via Traefik: HTTP {{ gitea_traefik_check.status }} (401 = tinyauth protecting, expected)"
+# Gitea retired 2026-06-13 → Forgejo is primary git server (defined in
+# docker/docker-compose.yml + 03-core-services.yml).
+# NOTE: the jade plays above still reference a `gitea` ssh alias + mint a gitea
+# token; those are removed when jade is retired in the hive Phase C work — do
+# not re-run 07 standalone until then.
 
 # =============================================================
 # Play 6: Jade — Git credentials + repos
