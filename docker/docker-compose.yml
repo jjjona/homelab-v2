@@ -302,10 +302,14 @@ services:
     environment:
       - USER_UID=1000
       - USER_GID=1000
-      # ROOT_URL is the raw LAN IP (not git.${DOMAIN}) so the container registry's
-      # bearer-token realm stays LAN-internal — same pattern Gitea used. The
-      # friendly git.${DOMAIN} web UI is served via the Traefik labels below.
-      - FORGEJO__server__ROOT_URL=http://192.168.0.159:3001
+      # ROOT_URL is the public web URL so web-UI clone links, e-mails, webhooks
+      # and the PocketID OAuth2 callback are all correct (and the admin "ROOT_URL
+      # mismatch" warning is gone). TRADEOFF (accepted 2026-06-13): Forgejo derives
+      # the container-registry bearer-token *realm* from ROOT_URL too, so LAN
+      # clients pulling 192.168.0.159:3001 now fetch their (small) token via
+      # git.${DOMAIN} through Cloudflare — image blobs still go LAN-direct to :3001.
+      # The /v2/token path rides web-noauth (:81), so it bypasses tinyauth.
+      - FORGEJO__server__ROOT_URL=https://git.${DOMAIN}
       - FORGEJO__server__SSH_DOMAIN=git.${DOMAIN}
       - FORGEJO__server__SSH_PORT=2222
       - FORGEJO__security__INSTALL_LOCK=true
