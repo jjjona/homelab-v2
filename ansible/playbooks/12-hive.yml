@@ -304,10 +304,12 @@
     hive_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/hive.sops.yml') | from_yaml }}"
     # Host path of the repo clone == compose project dir == the /app bind mount.
     hive_repo: /opt/hive
-    # Self-hosted in Forgejo (jade/hive) — internal LAN clone, read-only token,
-    # no GitHub dependency. The upstream jjjona/hive (GitHub, private) is mirrored
-    # here; hive-update pulls from this same origin.
-    hive_repo_url: "http://oauth2:{{ hive_secrets.hive_forgejo_token }}@192.168.0.159:3001/jade/hive.git"
+    # Source is the private GitHub repo, cloned over SSH with a write-enabled
+    # deploy key (hive_github_deploy_key in SOPS) — no Forgejo, no token in the
+    # URL. The key is installed for root (host git: this clone + hive-update +
+    # manual pushes) and mounted into the container (in-container agent pushes).
+    # hive-update pulls from this same origin.
+    hive_repo_url: "git@github.com:jjjona/hive.git"
     # DECISION: compose runs as root with HOME=/root, so ${HOME} in the repo's
     # docker-compose.yml expands host-side to these:
     hive_home: /root
@@ -324,6 +326,41 @@
       ansible.builtin.command: git config --global --replace-all safe.directory '*'
       changed_when: false
 
+    # --- Install the GitHub deploy key for ROOT (host-side git) -------------
+    # root runs the clone below, the hive-update wrapper (git pull) and any
+    # manual push. A github.com Host entry in root's ssh config points all three
+    # at the deploy key automatically; accept-new pins github's hostkey on first
+    # use, IdentitiesOnly stops ssh offering other keys first.
+    - name: Ensure root ~/.ssh exists
+      ansible.builtin.file:
+        path: /root/.ssh
+        state: directory
+        mode: "0700"
+
+    - name: Install GitHub deploy key for root
+      ansible.builtin.copy:
+        dest: /root/.ssh/hive_github_ed25519
+        # | trim + explicit \n: ansible strips the value's trailing newline when
+        # templating `content`, but OpenSSH keys require a final newline (else
+        # "error in libcrypto"). Normalize to exactly one.
+        content: "{{ hive_secrets.hive_github_deploy_key | trim }}\n"
+        mode: "0600"
+      no_log: true
+
+    - name: Point root's ssh at the deploy key for github.com
+      ansible.builtin.blockinfile:
+        path: /root/.ssh/config
+        create: true
+        mode: "0600"
+        marker: "# {mark} ANSIBLE MANAGED — hive github deploy key"
+        block: |
+          Host github.com
+              HostName github.com
+              User git
+              IdentityFile /root/.ssh/hive_github_ed25519
+              IdentitiesOnly yes
+              StrictHostKeyChecking accept-new
+
     # --- Clone the hive repo (this IS the /app bind mount; compose runs here) ---
 
     - name: Clone hive repo to {{ hive_repo }}
@@ -332,6 +369,12 @@
         dest: "{{ hive_repo }}"
         version: main
         update: true
+        # Repointing origin (Forgejo -> GitHub) and discarding any local-only
+        # commit on /opt/hive: hard-reset the working clone to origin/main.
+        # .env + docker-compose.override.yml are gitignored (untracked), so the
+        # reset leaves them in place; they are also re-rendered further below.
+        force: true
+        accept_hostkey: true
 
     # --- Seed host-side mount roots so compose doesn't mkdir them root-bare ---
     # Docker auto-creates missing bind-mount leaves, but pre-creating keeps
@@ -441,6 +484,46 @@
         group: "1000"
         recurse: true
 
+    # --- GitHub deploy key for the IN-CONTAINER hive user (uid 1000) ---------
+    # So the agent can `git push` from /app to the private GitHub origin. Seeded
+    # into a dir the override (below) mounts onto /home/hive/.ssh; git inside the
+    # container then resolves github.com via this config with no extra flags.
+    # IdentityFile is the IN-CONTAINER path. Kept separate from /state/ssh (the
+    # node-access key, used via `ssh -F /state/ssh/config`) on purpose.
+    - name: Seed in-container github ssh dir
+      ansible.builtin.file:
+        path: "{{ hive_state_dir }}/git-ssh"
+        state: directory
+        owner: "1000"
+        group: "1000"
+        mode: "0700"
+
+    - name: Seed in-container github deploy key
+      ansible.builtin.copy:
+        dest: "{{ hive_state_dir }}/git-ssh/id_github"
+        # | trim + explicit \n: ansible strips the value's trailing newline when
+        # templating `content`, but OpenSSH keys require a final newline (else
+        # "error in libcrypto"). Normalize to exactly one.
+        content: "{{ hive_secrets.hive_github_deploy_key | trim }}\n"
+        owner: "1000"
+        group: "1000"
+        mode: "0600"
+      no_log: true
+
+    - name: Seed in-container github ssh config
+      ansible.builtin.copy:
+        dest: "{{ hive_state_dir }}/git-ssh/config"
+        content: |
+          Host github.com
+              HostName github.com
+              User git
+              IdentityFile /home/hive/.ssh/id_github
+              IdentitiesOnly yes
+              StrictHostKeyChecking accept-new
+        owner: "1000"
+        group: "1000"
+        mode: "0600"
+
     # /state/projects stays EMPTY until /onboard-project registers the first
     # project (Phase D); no project.yaml is created here.
 
@@ -479,6 +562,11 @@
                 - "traefik.http.routers.hive.rule=Host(`hive.{{ hive_secrets.domain }}`)"
                 - "traefik.http.routers.hive.entrypoints=web"
                 - "traefik.http.services.hive.loadbalancer.server.port=4483"
+              # Mount the github deploy key onto the hive user's ~/.ssh so the
+              # in-container agent can `git push` to the private GitHub origin.
+              # Compose appends this to the base service's volumes list.
+              volumes:
+                - {{ hive_state_dir }}/git-ssh:/home/hive/.ssh
 
             traefik-kop:
               image: ghcr.io/jittering/traefik-kop:latest
