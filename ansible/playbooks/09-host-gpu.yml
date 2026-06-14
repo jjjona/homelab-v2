@@ -1,0 +1,214 @@
+---
+# 09-host-gpu.yml
+# Installs the NVIDIA GPU driver on the Proxmox host (RTX 4070 Ti).
+#
+# History: this file once also created AI LXC 203 (.163) and ran an Ollama +
+# Speaches AI stack inside it. Those AI workloads moved to Laptop 2 (.166, GTX
+# 1060) — see 11-laptops.yml — and AI LXC 203 was destroyed. The dead LXC-203
+# create/provision/destroy plays were removed 2026-06-14; only the host driver
+# play remains. The RTX 4070 Ti is currently idle, reserved for a future Windows
+# Gaming VM, but the host driver is live infra so its IaC is kept here.
+#
+# Play 1: Proxmox host — install NVIDIA driver with DKMS, blacklist nouveau.
+#
+# First run requires a reboot after nouveau blacklist + NVIDIA install.
+# The playbook will detect this and prompt.
+#
+# Safe to re-run: driver install skips if nvidia-smi already works.
+
+# =============================================================
+# Play 1: Proxmox host — install NVIDIA driver
+# =============================================================
+- name: Install NVIDIA driver on Proxmox host
+  hosts: proxmox
+  gather_facts: true
+  tags: [gpu, nvidia]
+
+  vars:
+    nvidia_driver_version: "580.126.18"
+    nvidia_driver_url: "https://us.download.nvidia.com/XFree86/Linux-x86_64/{{ nvidia_driver_version }}/NVIDIA-Linux-x86_64-{{ nvidia_driver_version }}.run"
+    nvidia_driver_file: "/tmp/NVIDIA-Linux-x86_64-{{ nvidia_driver_version }}.run"
+
+  tasks:
+
+    # --- Blacklist nouveau ---
+
+    - name: Blacklist nouveau driver
+      ansible.builtin.copy:
+        dest: /etc/modprobe.d/blacklist-nouveau.conf
+        content: |
+          blacklist nouveau
+          options nouveau modeset=0
+        owner: root
+        group: root
+        mode: "0644"
+      register: nouveau_blacklisted
+
+    - name: Regenerate initramfs after nouveau blacklist
+      ansible.builtin.command: update-initramfs -u
+      when: nouveau_blacklisted.changed
+
+    - name: Check if nouveau is currently loaded
+      ansible.builtin.shell: lsmod | grep -q nouveau
+      register: nouveau_loaded
+      ignore_errors: true
+      changed_when: false
+
+    - name: Warn if reboot needed for nouveau blacklist
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: nouveau is still loaded. A reboot is required before NVIDIA
+          driver can be installed. Run 'reboot' on the Proxmox host, then re-run
+          this playbook.
+      when: nouveau_loaded.rc == 0
+
+    - name: Fail if nouveau still loaded (reboot required)
+      ansible.builtin.fail:
+        msg: "Reboot required to unload nouveau. Reboot the host and re-run this playbook."
+      when: nouveau_loaded.rc == 0 and nouveau_blacklisted.changed
+
+    # --- Install kernel headers + build tools ---
+
+    - name: Install NVIDIA driver build dependencies
+      ansible.builtin.apt:
+        name:
+          - pve-headers-{{ ansible_kernel }}
+          - build-essential
+          - dkms
+          - wget
+        state: present
+        update_cache: true
+
+    # --- Check if NVIDIA driver already installed ---
+
+    - name: Check if nvidia-smi works
+      ansible.builtin.command: nvidia-smi
+      register: nvidia_smi_check
+      ignore_errors: true
+      changed_when: false
+
+    - name: Skip driver install if nvidia-smi works
+      ansible.builtin.debug:
+        msg: "NVIDIA driver already installed (nvidia-smi works), skipping install"
+      when: nvidia_smi_check.rc == 0
+
+    # --- Download and install NVIDIA driver ---
+
+    - name: Install NVIDIA driver
+      when: nvidia_smi_check.rc != 0
+      block:
+
+        - name: Download NVIDIA driver
+          ansible.builtin.get_url:
+            url: "{{ nvidia_driver_url }}"
+            dest: "{{ nvidia_driver_file }}"
+            mode: "0755"
+
+        - name: Install NVIDIA driver with DKMS
+          ansible.builtin.command: >
+            {{ nvidia_driver_file }}
+            --dkms
+            --no-questions
+            --ui=none
+            --disable-nouveau
+          register: nvidia_install
+          changed_when: true
+
+        - name: Show NVIDIA install output
+          ansible.builtin.debug:
+            var: nvidia_install.stdout_lines
+
+    # --- Ensure NVIDIA modules are loaded ---
+
+    - name: Load NVIDIA kernel modules
+      ansible.builtin.command: modprobe {{ item }}
+      loop:
+        - nvidia
+        - nvidia-uvm
+        - nvidia-modeset
+      changed_when: false
+
+    - name: Create NVIDIA device nodes (nvidia-smi initializes them)
+      ansible.builtin.command: nvidia-smi
+      changed_when: false
+
+    - name: Persist NVIDIA modules across reboots
+      ansible.builtin.copy:
+        dest: /etc/modules-load.d/nvidia.conf
+        content: |
+          nvidia
+          nvidia-uvm
+          nvidia-modeset
+        owner: root
+        group: root
+        mode: "0644"
+
+    # --- udev rules for LXC GPU access ---
+
+    - name: Create udev rule for NVIDIA device permissions (unprivileged LXC)
+      ansible.builtin.copy:
+        dest: /etc/udev/rules.d/99-nvidia-lxc.rules
+        content: |
+          # Allow unprivileged LXC containers to access NVIDIA devices
+          KERNEL=="nvidia[0-9]*", OWNER="100000", GROUP="100000", MODE="0660"
+          KERNEL=="nvidiactl", OWNER="100000", GROUP="100000", MODE="0660"
+          KERNEL=="nvidia-uvm", OWNER="100000", GROUP="100000", MODE="0660"
+          KERNEL=="nvidia-uvm-tools", OWNER="100000", GROUP="100000", MODE="0660"
+        owner: root
+        group: root
+        mode: "0644"
+      register: udev_rules
+
+    - name: Reload udev rules
+      ansible.builtin.command: udevadm control --reload-rules
+      when: udev_rules.changed
+
+    - name: Trigger udev rules
+      ansible.builtin.command: udevadm trigger
+      when: udev_rules.changed
+
+    - name: Set NVIDIA device permissions now (in case udev hasn't applied yet)
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: "100000"
+        group: "100000"
+        mode: "0660"
+      loop:
+        - /dev/nvidia0
+        - /dev/nvidiactl
+        - /dev/nvidia-uvm
+        - /dev/nvidia-uvm-tools
+      ignore_errors: true
+
+    # --- Verify + capture device info ---
+
+    - name: Verify nvidia-smi
+      ansible.builtin.command: nvidia-smi
+      register: nvidia_smi
+      changed_when: false
+
+    - name: Show nvidia-smi output
+      ansible.builtin.debug:
+        var: nvidia_smi.stdout_lines
+
+    - name: Get nvidia device major number
+      ansible.builtin.shell: awk '$2 == "nvidia" {print $1}' /proc/devices
+      register: nvidia_major
+      changed_when: false
+
+    - name: Get nvidia-uvm device major number
+      ansible.builtin.shell: awk '$2 == "nvidia-uvm" {print $1}' /proc/devices
+      register: nvidia_uvm_major
+      changed_when: false
+
+    - name: Store NVIDIA device major numbers as facts
+      ansible.builtin.set_fact:
+        nvidia_device_major: "{{ nvidia_major.stdout | trim }}"
+        nvidia_uvm_major: "{{ nvidia_uvm_major.stdout | trim }}"
+      delegate_to: localhost
+      delegate_facts: true
+
+    - name: Show captured device major numbers
+      ansible.builtin.debug:
+        msg: "nvidia major: {{ nvidia_major.stdout | trim }}, nvidia-uvm major: {{ nvidia_uvm_major.stdout | trim }}"
+
