@@ -316,6 +316,14 @@ services:
       - FORGEJO__service__DISABLE_REGISTRATION=false
       - FORGEJO__service__ALLOW_ONLY_EXTERNAL_REGISTRATION=true
       - FORGEJO__service__SHOW_REGISTRATION_BUTTON=false
+      # Privacy posture (set 2026-06-14): git endpoints ride web-noauth (:81),
+      # bypassing tinyauth so the git CLI works — which means Forgejo's OWN visibility
+      # controls are the only gate on git.${DOMAIN}. So lock them down:
+      # REQUIRE_SIGNIN_VIEW = nothing is browseable/cloneable anonymously over the
+      # internet; DEFAULT_PRIVATE = new repos are created private by default (the
+      # create form still lets you choose Public manually per-repo).
+      - FORGEJO__service__REQUIRE_SIGNIN_VIEW=true
+      - FORGEJO__repository__DEFAULT_PRIVATE=private
       - FORGEJO__database__DB_TYPE=sqlite3
       - FORGEJO__actions__ENABLED=true
       - FORGEJO__packages__ENABLED=true
