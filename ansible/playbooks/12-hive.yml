@@ -50,8 +50,7 @@
 #   container that runs bun + a few agent subprocesses. Bump if intake is heavy.
 #
 # Safe to re-run: LXC creation skips if 205 already exists (block guarded by
-# pct status, like 07-ai-playground.yml); Docker install + compose deploy are
-# idempotent.
+# pct status); Docker install + compose deploy are idempotent.
 #
 # ============================================================================
 # NOTE: Sections tagged "# TODO (task #7)" are intentionally STUBBED in this
