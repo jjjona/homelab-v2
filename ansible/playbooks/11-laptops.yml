@@ -497,12 +497,20 @@
     laptop_backup:
       laptop1:
         healthchecks_url: "{{ backup.laptop1_healthchecks_url }}"
+        # Staggered start times so the two laptops don't hit the SHARED B2 repo's
+        # exclusive prune lock at the same instant (collision symptom: one host's
+        # `forget --prune` fails "repository is already locked by ...k3s-worker-N").
+        # --retry-lock in the script is the backstop; staggering avoids the wait.
+        cron_hour: "4"
+        cron_minute: "0"
         paths:
           - /var/lib/docker/volumes/arcane-agent_arcane-data/_data
         pause_containers:
           - arcane-edge-agent
       laptop2:
         healthchecks_url: "{{ backup.laptop2_healthchecks_url }}"
+        cron_hour: "4"
+        cron_minute: "30"
         paths:
           - /var/lib/docker/volumes/jade-memory_journal-data/_data
           - /var/lib/docker/volumes/jade-memory_knowledge-data/_data
@@ -608,6 +616,7 @@
             --exclude '{{ pattern }}' \
           {% endfor %}
             --no-scan \
+            --retry-lock 10m \
             >> "$LOGFILE" 2>&1; then
             log "Backup completed successfully"
           else
@@ -621,6 +630,7 @@
           if [ "$FAILED" -eq 0 ]; then
             log "Pruning old snapshots..."
             if restic forget --prune \
+              --retry-lock 10m \
               --keep-daily 7 \
               --keep-weekly 4 \
               --keep-monthly 6 \
@@ -644,10 +654,10 @@
         group: root
         mode: "0755"
 
-    - name: Install daily backup cron job (04:00, staggered after proxmox 03:00)
+    - name: Install daily backup cron job (per-host staggered start; see laptop_backup)
       ansible.builtin.cron:
         name: "Restic backup to B2"
-        hour: "4"
-        minute: "0"
+        hour: "{{ laptop_backup[inventory_hostname].cron_hour }}"
+        minute: "{{ laptop_backup[inventory_hostname].cron_minute }}"
         job: "{{ backup_script }}"
         user: root
