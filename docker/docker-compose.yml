@@ -290,6 +290,32 @@ services:
       web:
         ipv4_address: 172.20.0.16
 
+  linkding:
+    image: sissbruecker/linkding:latest
+    container_name: linkding
+    environment:
+      - LD_SUPERUSER_NAME=${LINKDING_SUPERUSER_NAME}
+      - LD_SUPERUSER_PASSWORD=${LINKDING_SUPERUSER_PASSWORD}
+      - LD_CSRF_TRUSTED_ORIGINS=https://links.${DOMAIN}
+      - LD_ENABLE_OIDC=${LINKDING_ENABLE_OIDC:-}
+      # linkding uses mozilla-django-oidc — needs explicit OIDC_* endpoints (no provider-URL auto-discovery)
+      - OIDC_RP_CLIENT_ID=${LINKDING_OIDC_CLIENT_ID:-}
+      - OIDC_RP_CLIENT_SECRET=${LINKDING_OIDC_CLIENT_SECRET:-}
+      - OIDC_OP_AUTHORIZATION_ENDPOINT=https://auth.${DOMAIN}/authorize
+      - OIDC_OP_TOKEN_ENDPOINT=https://auth.${DOMAIN}/api/oidc/token
+      - OIDC_OP_USER_ENDPOINT=https://auth.${DOMAIN}/api/oidc/userinfo
+      - OIDC_OP_JWKS_ENDPOINT=https://auth.${DOMAIN}/.well-known/jwks.json
+    volumes:
+      - /mnt/data/docker/linkding/data:/etc/linkding/data
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.linkding.rule=Host(`links.${DOMAIN}`)"
+      - "traefik.http.services.linkding.loadbalancer.server.port=9090"
+    networks:
+      web:
+        ipv4_address: 172.20.0.15
+
   forgejo:
     image: codeberg.org/forgejo/forgejo:9
     container_name: forgejo

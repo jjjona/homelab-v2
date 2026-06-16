@@ -13,6 +13,7 @@
 #   - Ephemera (book downloader, behind VPN)
 #   - FlareSolverr (Cloudflare bypass, behind VPN)
 #   - Bazarr (subtitle management)
+#   - Linkding (bookmark manager)
 #   - Booklore + MariaDB (book library with BookDrop auto-import)
 #   - Gluetun (VPN tunnel for Prowlarr + Autobrr + Ephemera + FlareSolverr)
 #
@@ -120,6 +121,7 @@
         - /mnt/data/docker/jellyseerr/config
         - /mnt/data/docker/autobrr/config
         - /mnt/data/docker/bazarr/config
+        - /mnt/data/docker/linkding/data
         - /mnt/data/docker/pocketid/data
         - /mnt/data/docker/tinyauth/data
         - /mnt/data/docker/forgejo-runner
@@ -231,10 +233,15 @@
           DOMAIN={{ secrets.domain }}
           ARCANE_ENCRYPTION_KEY={{ secrets.arcane_encryption_key }}
           ARCANE_JWT_SECRET={{ secrets.arcane_jwt_secret }}
+          LINKDING_SUPERUSER_NAME={{ secrets.linkding_superuser_name }}
+          LINKDING_SUPERUSER_PASSWORD={{ secrets.linkding_superuser_password }}
           POCKETID_ENCRYPTION_KEY={{ secrets.pocketid_encryption_key }}
           TINYAUTH_SECRET={{ secrets.tinyauth_secret }}
           TINYAUTH_OIDC_CLIENT_ID={{ secrets.tinyauth_oidc_client_id }}
           TINYAUTH_OIDC_CLIENT_SECRET={{ secrets.tinyauth_oidc_client_secret }}
+          LINKDING_ENABLE_OIDC=True
+          LINKDING_OIDC_CLIENT_ID={{ secrets.linkding_oidc_client_id }}
+          LINKDING_OIDC_CLIENT_SECRET={{ secrets.linkding_oidc_client_secret }}
           AA_BASE_URL={{ secrets.aa_base_url }}
           LG_BASE_URL={{ secrets.lg_base_url }}
           BOOKLORE_DB_ROOT_PASSWORD={{ secrets.booklore_db_root_password }}
@@ -487,6 +494,17 @@
       retries: 3
       delay: 5
       until: bazarr_check is not failed
+
+    - name: Verify Linkding is responding
+      ansible.builtin.uri:
+        url: "http://localhost:80/"
+        headers:
+          Host: "links.{{ secrets.domain }}"
+        status_code: [200, 302, 401]
+      register: linkding_check
+      retries: 3
+      delay: 5
+      until: linkding_check is not failed
 
     - name: Verify VPN tunnel IP
       ansible.builtin.command: docker exec gluetun wget -qO- https://ipinfo.io/ip
