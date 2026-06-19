@@ -561,6 +561,16 @@
                 - "traefik.http.routers.hive.rule=Host(`hive.{{ hive_secrets.domain }}`)"
                 - "traefik.http.routers.hive.entrypoints=web"
                 - "traefik.http.services.hive.loadbalancer.server.port=4483"
+                # hive web runs Bun's dev server, which serves CSS/JS at
+                # /_bun/asset/<hash> URLs whose content is NOT immutable (the same
+                # URL changes content across rebuilds). Cloudflare caches these by
+                # extension and pins a stale copy -> broken styling on hive.jnrm.eu
+                # while local (direct to :4483) stays fresh. Send Cache-Control:
+                # no-store so Cloudflare never caches hive; the app is single-user
+                # so there's nothing to gain from edge caching. (Composes with the
+                # entrypoint-level tinyauth on :web — both middlewares apply.)
+                - "traefik.http.middlewares.hive-nocache.headers.customResponseHeaders.Cache-Control=no-store"
+                - "traefik.http.routers.hive.middlewares=hive-nocache"
               # Mount the github deploy key onto the hive user's ~/.ssh so the
               # in-container agent can `git push` to the private GitHub origin.
               # Compose appends this to the base service's volumes list.
