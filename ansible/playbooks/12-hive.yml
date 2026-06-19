@@ -680,6 +680,15 @@
           git -C /opt/hive pull --ff-only
           chown -R 1000:1000 /opt/hive
           cd /opt/hive && HOME=/root docker compose up -d --build
+          # `up -d` returns once PID 1 (tini) is up, but start-hive.sh still has
+          # to finish `bun install` and create the tmux server. Respawning before
+          # then fails with "error connecting to /tmp/tmux-1000/default". Wait for
+          # the services session to exist (start-hive.sh already starts fresh
+          # web/loop windows, so the respawn below is just a belt-and-suspenders).
+          for i in $(seq 1 30); do
+            docker exec hive tmux has-session -t services 2>/dev/null && break
+            sleep 1
+          done
           docker exec hive tmux respawn-window -k -t services:loop
           docker exec hive tmux respawn-window -k -t services:web
 
