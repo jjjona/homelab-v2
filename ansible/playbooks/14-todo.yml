@@ -1,0 +1,183 @@
+---
+# ============================================================================
+# 14-todo.yml — Deploy the todo app (github.com/jjjona/todo) on Laptop 1
+#
+# A minimal self-hosted Todoist-style app (Bun + SQLite, single container)
+# whose point is completion-anchored recurrence ("X after done"), plus a
+# self-hosted ntfy sidecar for iPhone push reminders.
+#
+# Architecture:
+#   - Repo is PRIVATE GitHub jjjona/todo, cloned to /opt/todo over a READ-ONLY
+#     deploy key (unlike writing/hive there is no in-container agent: the clone
+#     is only a build context — source is COPY'd into the image, nothing binds
+#     it at runtime, so `update: true` is safe).
+#   - Data (SQLite + ntfy auth/cache) lives in /opt/todo-data, bind-mounted;
+#     backed up nightly by restic (11-laptops.yml laptop_backup.paths).
+#   - Routing: compose labels -> traefik-kop (already on laptop1) -> Redis ->
+#     Traefik.  todo.<domain> on `web` (tinyauth forwardAuth, like writing);
+#     ntfy.<domain> on `web-noauth` — the ntfy iOS app can't do SSO, ntfy's own
+#     auth is the gate (auth-default-access=deny-all + user/password).
+#     ntfy.<domain> also needs a cloudflared ingress rule -> traefik:81
+#     (03-core-services.yml).
+#   - iOS instant delivery: NTFY_UPSTREAM_BASE_URL=https://ntfy.sh relays only
+#     a wake-up ping through ntfy.sh; message content stays on this server.
+#
+# Secrets: secrets/todo.sops.yml (deploy key, ntfy user/password/topic),
+#          secrets/hive.sops.yml (domain).
+# Run from ansible/:  ansible-playbook playbooks/14-todo.yml
+# ============================================================================
+
+# =============================================================
+# Play A: Laptop 1 (.165) — deploy the todo + ntfy stack
+# =============================================================
+- name: Deploy todo on Laptop 1
+  hosts: laptop1
+  gather_facts: false
+  tags: [todo, deploy]
+
+  vars:
+    todo_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/todo.sops.yml') | from_yaml }}"
+    hive_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/hive.sops.yml') | from_yaml }}"
+    domain: "{{ hive_secrets.domain }}"
+    todo_dir: /opt/todo            # git clone == docker build context (code only)
+    todo_data_dir: /opt/todo-data  # SQLite + ntfy state; in restic backup paths
+    todo_repo_url: "git@github.com:jjjona/todo.git"
+    todo_web_port: 4712            # host port; container listens on 3000
+    ntfy_web_port: 4713            # host port; container listens on 80
+
+  tasks:
+    - name: Ensure git is installed on laptop1 (Alpine)
+      ansible.builtin.command: apk add --no-cache git
+      args:
+        creates: /usr/bin/git
+
+    # --- Deploy key so root can clone/pull the PRIVATE repo (read-only) ---
+    - name: Ensure root ~/.ssh exists
+      ansible.builtin.file:
+        path: /root/.ssh
+        state: directory
+        mode: "0700"
+
+    - name: Install todo deploy key for root
+      ansible.builtin.copy:
+        dest: /root/.ssh/todo_github_ed25519
+        # | trim + explicit \n: OpenSSH keys need exactly one trailing newline.
+        content: "{{ todo_secrets.todo_deploy_key | trim }}\n"
+        mode: "0600"
+      no_log: true
+
+    - name: Clone/update todo repo (build context only — safe to fast-forward)
+      ansible.builtin.git:
+        repo: "{{ todo_repo_url }}"
+        dest: "{{ todo_dir }}"
+        version: main
+        update: true
+        accept_hostkey: true
+        key_file: /root/.ssh/todo_github_ed25519
+      register: todo_git
+
+    # --- Data dirs (bind mounts) ---
+    - name: Create todo data dir (SQLite; container runs as uid 1000 "bun")
+      ansible.builtin.file:
+        path: "{{ todo_data_dir }}/todo"
+        state: directory
+        owner: "1000"
+        group: "1000"
+        mode: "0750"
+
+    - name: Create ntfy data dir (ntfy runs as root in its container)
+      ansible.builtin.file:
+        path: "{{ todo_data_dir }}/ntfy"
+        state: directory
+        owner: root
+        group: root
+        mode: "0750"
+
+    # --- Per-system config (gitignored in the repo) ---
+    - name: Write todo .env
+      ansible.builtin.copy:
+        dest: "{{ todo_dir }}/.env"
+        content: |
+          # Managed by ansible (14-todo.yml). Per-system config.
+          TODO_HOST=todo.{{ domain }}
+          NTFY_HOST=ntfy.{{ domain }}
+          TODO_WEB_PORT={{ todo_web_port }}
+          NTFY_WEB_PORT={{ ntfy_web_port }}
+          TODO_DATA_DIR={{ todo_data_dir }}
+          NTFY_TOPIC={{ todo_secrets.ntfy_topic }}
+          NTFY_USER={{ todo_secrets.ntfy_user }}
+          NTFY_PASSWORD={{ todo_secrets.ntfy_password }}
+          TZ=Europe/Brussels
+        mode: "0600"
+      no_log: true
+
+    # --- Deploy ---
+    - name: Build and start todo + ntfy
+      ansible.builtin.command:
+        cmd: docker compose up -d --build
+        chdir: "{{ todo_dir }}"
+      changed_when: true
+
+    - name: Wait for the todo web UI on :{{ todo_web_port }}
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ todo_web_port }}"
+        timeout: 180
+
+    - name: Wait for ntfy on :{{ ntfy_web_port }}
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ ntfy_web_port }}"
+        timeout: 60
+
+    # --- ntfy auth: converge the publisher/subscriber user + topic ACL ---
+    # auth-default-access=deny-all, so this user is the only way in. The todo
+    # server publishes with it; the iPhone ntfy app subscribes with it.
+    - name: Ensure ntfy user exists (create or converge password)
+      ansible.builtin.shell: |
+        set -e
+        if docker exec ntfy ntfy user list 2>&1 | grep -q "^user {{ todo_secrets.ntfy_user }} "; then
+          docker exec -e NTFY_PASSWORD='{{ todo_secrets.ntfy_password }}' ntfy \
+            ntfy user change-pass {{ todo_secrets.ntfy_user }}
+        else
+          docker exec -e NTFY_PASSWORD='{{ todo_secrets.ntfy_password }}' ntfy \
+            ntfy user add {{ todo_secrets.ntfy_user }}
+        fi
+      no_log: true
+      changed_when: true
+
+    - name: Grant the user read-write on the topic
+      ansible.builtin.command:
+        cmd: docker exec ntfy ntfy access {{ todo_secrets.ntfy_user }} {{ todo_secrets.ntfy_topic }} rw
+      no_log: true
+      changed_when: true
+
+    # --- Update helper ---
+    - name: Install todo-update helper (pull + rebuild)
+      ansible.builtin.copy:
+        dest: /usr/local/bin/todo-update
+        mode: "0755"
+        content: |
+          #!/bin/sh
+          # Managed by ansible (14-todo.yml). Pull latest todo code and redeploy.
+          set -e
+          cd /opt/todo
+          GIT_SSH_COMMAND='ssh -i /root/.ssh/todo_github_ed25519 -o IdentitiesOnly=yes' \
+            git pull --ff-only
+          docker compose up -d --build
+
+# =============================================================
+# Play B: docker-host (.159) — refresh Traefik for the new kop routes
+# =============================================================
+# Documented gotcha: Traefik does not re-read traefik-kop/Redis keys republished
+# after its own startup. New containers publishing kop keys need a Traefik
+# bounce to appear. Brief (seconds) downtime on existing routes.
+- name: Refresh Traefik so it picks up the todo + ntfy routes
+  hosts: docker_host
+  gather_facts: false
+  tags: [todo, traefik]
+
+  tasks:
+    - name: Restart traefik
+      ansible.builtin.command: docker restart traefik
+      changed_when: true

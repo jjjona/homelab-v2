@@ -505,8 +505,17 @@
         cron_minute: "0"
         paths:
           - /var/lib/docker/volumes/arcane-agent_arcane-data/_data
+          # writing-studio bind-mount clone: stories/seeds/worlds/taste/runs +
+          # tmp/ (human source materials, gitignored) + .git history. Belt-and-
+          # suspenders alongside the hourly GitHub auto-commit (13-writing.yml).
+          - /opt/writing
+          # todo app data: SQLite task db + ntfy auth/cache (14-todo.yml)
+          - /opt/todo-data
         pause_containers:
           - arcane-edge-agent
+          - writing-studio
+          - todo
+          - ntfy
       laptop2:
         healthchecks_url: "{{ backup.laptop2_healthchecks_url }}"
         cron_hour: "4"

@@ -291,6 +291,11 @@
             # the inbox carries no auth of its own (12-hive.yml).
             - hostname: hive.{{ secrets.domain }}
               service: http://traefik:80
+            # ntfy push server (todo reminders, 14-todo.yml) on :81/web-noauth —
+            # the ntfy iOS app can't do tinyauth SSO; ntfy's own auth
+            # (deny-all + user/password) is the gate.
+            - hostname: ntfy.{{ secrets.domain }}
+              service: http://traefik:81
             - service: http://traefik:80
         owner: "65532"
         group: "65532"
