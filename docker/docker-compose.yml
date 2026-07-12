@@ -50,21 +50,24 @@ services:
         ipv4_address: 172.20.0.5
 
   tinyauth:
-    image: ghcr.io/steveiliop56/tinyauth:v4
+    # v5 supports multiple simultaneous OAuth attempts. This matters when several
+    # long-lived tabs discover an expired session at once: v4 could overwrite the
+    # pending OAuth verifier/return URL and finish on an error page.
+    image: ghcr.io/steveiliop56/tinyauth:v5.0.7
     container_name: tinyauth
     environment:
-      - APP_URL=https://login.${DOMAIN}
-      - SECRET=${TINYAUTH_SECRET}
-      - COOKIE_DOMAIN=.${DOMAIN}
-      - PROVIDERS_POCKETID_CLIENT_ID=${TINYAUTH_OIDC_CLIENT_ID}
-      - PROVIDERS_POCKETID_CLIENT_SECRET=${TINYAUTH_OIDC_CLIENT_SECRET}
-      - PROVIDERS_POCKETID_AUTH_URL=https://auth.${DOMAIN}/authorize
-      - PROVIDERS_POCKETID_TOKEN_URL=https://auth.${DOMAIN}/api/oidc/token
-      - PROVIDERS_POCKETID_USER_INFO_URL=https://auth.${DOMAIN}/api/oidc/userinfo
-      - PROVIDERS_POCKETID_REDIRECT_URL=https://login.${DOMAIN}/api/oauth/callback/pocketid
-      - PROVIDERS_POCKETID_SCOPES=openid email profile groups
-      - PROVIDERS_POCKETID_NAME=Pocket ID
-      - OAUTH_AUTO_REDIRECT=pocketid
+      - TINYAUTH_APPURL=https://login.${DOMAIN}
+      - TINYAUTH_DATABASE_PATH=/app/data/tinyauth.db
+      - TINYAUTH_AUTH_SECURECOOKIE=true
+      - TINYAUTH_OAUTH_PROVIDERS_POCKETID_CLIENTID=${TINYAUTH_OIDC_CLIENT_ID}
+      - TINYAUTH_OAUTH_PROVIDERS_POCKETID_CLIENTSECRET=${TINYAUTH_OIDC_CLIENT_SECRET}
+      - TINYAUTH_OAUTH_PROVIDERS_POCKETID_AUTHURL=https://auth.${DOMAIN}/authorize
+      - TINYAUTH_OAUTH_PROVIDERS_POCKETID_TOKENURL=https://auth.${DOMAIN}/api/oidc/token
+      - TINYAUTH_OAUTH_PROVIDERS_POCKETID_USERINFOURL=https://auth.${DOMAIN}/api/oidc/userinfo
+      - TINYAUTH_OAUTH_PROVIDERS_POCKETID_REDIRECTURL=https://login.${DOMAIN}/api/oauth/callback/pocketid
+      - TINYAUTH_OAUTH_PROVIDERS_POCKETID_SCOPES=openid email profile groups
+      - TINYAUTH_OAUTH_PROVIDERS_POCKETID_NAME=Pocket ID
+      - TINYAUTH_OAUTH_AUTOREDIRECT=pocketid
     volumes:
       - /mnt/data/docker/tinyauth/data:/app/data
     restart: unless-stopped
