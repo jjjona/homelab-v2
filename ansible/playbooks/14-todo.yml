@@ -156,6 +156,8 @@
     - name: Install todo-update helper (pull + rebuild)
       ansible.builtin.copy:
         dest: /usr/local/bin/todo-update
+        owner: root
+        group: root
         mode: "0755"
         content: |
           #!/bin/sh
@@ -165,6 +167,42 @@
           GIT_SSH_COMMAND='ssh -i /root/.ssh/todo_github_ed25519 -o IdentitiesOnly=yes' \
             git pull --ff-only
           docker compose up -d --build
+      tags: [helpers]
+
+    - name: Install todo container shell/exec helper
+      ansible.builtin.copy:
+        dest: /usr/local/bin/todo
+        owner: root
+        group: root
+        mode: "0755"
+        content: |
+          #!/bin/sh
+          set -eu
+          if [ "$#" -eq 0 ]; then
+            exec docker exec -it -u bun -w /app todo sh
+          fi
+          exec docker exec -it -u bun -w /app todo "$@"
+      tags: [helpers]
+
+    - name: Show todo command reminder on interactive server login
+      ansible.builtin.copy:
+        dest: /etc/profile.d/todo-commands.sh
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by ansible (14-todo.yml). Interactive logins only.
+          case "$-" in
+            *i*)
+              printf '\n\033[1;36mTodo commands:\033[0m\n'
+              printf '  \033[1;32mtodo\033[0m                         enter the app container at /app\n'
+              printf '  \033[1;32mtodo-update\033[0m                  pull + rebuild + recreate\n'
+              printf '  \033[1;32mdocker compose ps\033[0m            show todo + ntfy status\n'
+              printf '  \033[1;32mdocker compose logs -f todo\033[0m  follow app logs\n'
+              printf '  \033[1;32mdocker compose logs -f ntfy\033[0m  follow notification logs\n\n'
+              ;;
+          esac
+      tags: [helpers]
 
 # =============================================================
 # Play B: docker-host (.159) — refresh Traefik for the new kop routes
