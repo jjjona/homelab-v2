@@ -7,10 +7,9 @@
 # self-hosted ntfy sidecar for iPhone push reminders.
 #
 # Architecture:
-#   - Repo is PRIVATE GitHub jjjona/todo, cloned to /opt/todo over a READ-ONLY
-#     deploy key (unlike writing/hive there is no in-container agent: the clone
-#     is only a build context — source is COPY'd into the image, nothing binds
-#     it at runtime, so `update: true` is safe).
+#   - Repo is PRIVATE GitHub jjjona/todo, cloned to /opt/todo and bind-mounted
+#     at /app. Codex and Git run inside the app container as uid 1000; its login
+#     state is a named volume and its deploy key is mounted from the host.
 #   - Data (SQLite + ntfy auth/cache) lives in /opt/todo-data, bind-mounted;
 #     backed up nightly by restic (11-laptops.yml laptop_backup.paths).
 #   - Routing: compose labels -> traefik-kop (already on laptop1) -> Redis ->
@@ -39,8 +38,9 @@
     todo_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/todo.sops.yml') | from_yaml }}"
     hive_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/hive.sops.yml') | from_yaml }}"
     domain: "{{ hive_secrets.domain }}"
-    todo_dir: /opt/todo            # git clone == docker build context (code only)
+    todo_dir: /opt/todo            # git clone == build context and /app bind mount
     todo_data_dir: /opt/todo-data  # SQLite + ntfy state; in restic backup paths
+    todo_git_ssh: /opt/todo-git-ssh
     todo_repo_url: "git@github.com:jjjona/todo.git"
     todo_web_port: 4712            # host port; container listens on 3000
     ntfy_web_port: 4713            # host port; container listens on 80
@@ -66,7 +66,7 @@
         mode: "0600"
       no_log: true
 
-    - name: Clone/update todo repo (build context only — safe to fast-forward)
+    - name: Clone/update Todo repo
       ansible.builtin.git:
         repo: "{{ todo_repo_url }}"
         dest: "{{ todo_dir }}"
@@ -75,6 +75,54 @@
         accept_hostkey: true
         key_file: /root/.ssh/todo_github_ed25519
       register: todo_git
+
+    - name: Set git identity for Codex commits
+      ansible.builtin.command:
+        cmd: git config --file {{ todo_dir }}/.git/config {{ item.k }} "{{ item.v }}"
+      loop:
+        - { k: user.name, v: "todo-codex" }
+        - { k: user.email, v: "todo-codex@{{ domain }}" }
+      changed_when: false
+
+    - name: Keep host-local deployment files out of git status
+      ansible.builtin.copy:
+        dest: "{{ todo_dir }}/.git/info/exclude"
+        content: |
+          # Managed by ansible (14-todo.yml).
+          .env
+          docker-compose.override.yml
+        mode: "0644"
+
+    - name: Create container git SSH directory
+      ansible.builtin.file:
+        path: "{{ todo_git_ssh }}"
+        state: directory
+        owner: "1000"
+        group: "1000"
+        mode: "0700"
+
+    - name: Install Todo deploy key for the container
+      ansible.builtin.copy:
+        dest: "{{ todo_git_ssh }}/id_ed25519"
+        content: "{{ todo_secrets.todo_deploy_key | trim }}\n"
+        owner: "1000"
+        group: "1000"
+        mode: "0600"
+      no_log: true
+
+    - name: Write container SSH config
+      ansible.builtin.copy:
+        dest: "{{ todo_git_ssh }}/config"
+        owner: "1000"
+        group: "1000"
+        mode: "0644"
+        content: |
+          Host github.com
+              HostName github.com
+              User git
+              IdentityFile /home/bun/.ssh/id_ed25519
+              IdentitiesOnly yes
+              StrictHostKeyChecking accept-new
 
     # --- Data dirs (bind mounts) ---
     - name: Create todo data dir (SQLite; container runs as uid 1000 "bun")
@@ -110,6 +158,25 @@
           TZ=Europe/Brussels
         mode: "0600"
       no_log: true
+
+    - name: Mount the Todo Git credentials into the container
+      ansible.builtin.copy:
+        dest: "{{ todo_dir }}/docker-compose.override.yml"
+        mode: "0644"
+        content: |
+          # Managed by ansible (14-todo.yml).
+          services:
+            todo:
+              volumes:
+                - {{ todo_git_ssh }}:/home/bun/.ssh
+
+    - name: Make the checkout editable by the container user
+      ansible.builtin.file:
+        path: "{{ todo_dir }}"
+        state: directory
+        recurse: true
+        owner: "1000"
+        group: "1000"
 
     # --- Deploy ---
     - name: Build and start todo + ntfy
@@ -153,7 +220,7 @@
       changed_when: true
 
     # --- Update helper ---
-    - name: Install todo-update helper (pull + cached rebuild)
+    - name: Install todo-update helper (pull + restart)
       ansible.builtin.copy:
         dest: /usr/local/bin/todo-update
         owner: root
@@ -162,11 +229,11 @@
         content: |
           #!/bin/sh
           # Managed by ansible (14-todo.yml). Pull latest todo code and redeploy.
-          set -e
-          cd /opt/todo
-          GIT_SSH_COMMAND='ssh -i /root/.ssh/todo_github_ed25519 -o IdentitiesOnly=yes' \
-            git pull --ff-only
-          docker compose up -d --build
+          set -eu
+          docker exec -u bun -w /app todo git pull --ff-only
+          docker restart todo >/dev/null
+          echo "todo-update: pulled + restarted (container NOT recreated)."
+          echo "  Dockerfile changed? run: todo-rebuild"
       tags: [helpers]
 
     - name: Install todo-rebuild helper (pull + clean rebuild)
@@ -178,9 +245,8 @@
         content: |
           #!/bin/sh
           set -eu
+          docker exec -u bun -w /app todo git pull --ff-only
           cd /opt/todo
-          GIT_SSH_COMMAND='ssh -i /root/.ssh/todo_github_ed25519 -o IdentitiesOnly=yes' \
-            git pull --ff-only
           docker compose build --no-cache
           docker compose up -d --force-recreate
       tags: [helpers]
@@ -212,7 +278,7 @@
             *i*)
               printf '\n\033[1;36mTodo commands:\033[0m\n'
               printf '  \033[1;32mtodo\033[0m          enter the app container at /app\n'
-              printf '  \033[1;32mtodo-update\033[0m   pull + cached rebuild\n'
+              printf '  \033[1;32mtodo-update\033[0m   pull + restart (no recreate)\n'
               printf '  \033[1;32mtodo-rebuild\033[0m  pull + clean rebuild + recreate\n\n'
               ;;
           esac
