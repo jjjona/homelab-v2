@@ -153,9 +153,9 @@
       changed_when: true
 
     # --- Update helper ---
-    - name: Install todo-rebuild helper (pull + rebuild)
+    - name: Install todo-update helper (pull + cached rebuild)
       ansible.builtin.copy:
-        dest: /usr/local/bin/todo-rebuild
+        dest: /usr/local/bin/todo-update
         owner: root
         group: root
         mode: "0755"
@@ -166,15 +166,23 @@
           cd /opt/todo
           GIT_SSH_COMMAND='ssh -i /root/.ssh/todo_github_ed25519 -o IdentitiesOnly=yes' \
             git pull --ff-only
-          docker compose up -d --build --force-recreate
+          docker compose up -d --build
       tags: [helpers]
 
-    - name: Keep todo-update as a compatibility alias
-      ansible.builtin.file:
-        src: /usr/local/bin/todo-rebuild
-        dest: /usr/local/bin/todo-update
-        state: link
-        force: true
+    - name: Install todo-rebuild helper (pull + clean rebuild)
+      ansible.builtin.copy:
+        dest: /usr/local/bin/todo-rebuild
+        owner: root
+        group: root
+        mode: "0755"
+        content: |
+          #!/bin/sh
+          set -eu
+          cd /opt/todo
+          GIT_SSH_COMMAND='ssh -i /root/.ssh/todo_github_ed25519 -o IdentitiesOnly=yes' \
+            git pull --ff-only
+          docker compose build --no-cache
+          docker compose up -d --force-recreate
       tags: [helpers]
 
     - name: Install todo container shell/exec helper
@@ -204,7 +212,8 @@
             *i*)
               printf '\n\033[1;36mTodo commands:\033[0m\n'
               printf '  \033[1;32mtodo\033[0m          enter the app container at /app\n'
-              printf '  \033[1;32mtodo-rebuild\033[0m  pull + rebuild + recreate\n\n'
+              printf '  \033[1;32mtodo-update\033[0m   pull + cached rebuild\n'
+              printf '  \033[1;32mtodo-rebuild\033[0m  pull + clean rebuild + recreate\n\n'
               ;;
           esac
       tags: [helpers]
