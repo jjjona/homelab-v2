@@ -1,0 +1,461 @@
+---
+# ============================================================================
+# 13-writing.yml — Deploy the Codex Writing Studio (github.com/jjjona/writing)
+# and register its direct-operation brief in Hive.
+#
+# Architecture:
+#   - `writing` is a standalone, Codex-only fiction workflow. The repo is
+#     bind-mounted at /workspace; Bun serves the Writing UI on container port
+#     4974 and Codex conversations persist through tmux.
+#   - Worlds, stories, and durable workflow state are ordinary repository files.
+#     Runtime state and Codex sessions/login live in Docker named volumes.
+#   - Hive may perform explicitly requested software engineering on apps/,
+#     packages/, scripts/, and deployment files. It must not run the fiction
+#     workflow or alter story/world content unless the operator asks.
+#
+#   Transport is docker-exec via node-lt1, not Hive's autonomous project tier:
+#     ssh -F /state/ssh/config node-lt1 \
+#       'docker exec -u writing -w /workspace writing-studio ...'
+#   The Bun server hot-reloads in-place edits for operator review.
+#
+#   Public exposure mirrors hive: writing.<domain> on the `web` entrypoint
+#   (tinyauth forwardAuth), routed by the traefik-kop already running on laptop1
+#   (BIND_IP 192.168.0.165) -> Redis (.159) -> Traefik.
+#
+# Secrets: secrets/writing.sops.yml (deploy key), secrets/hive.sops.yml (domain).
+# Run from ansible/:  ansible-playbook playbooks/13-writing.yml
+# ============================================================================
+
+# =============================================================
+# Play A: Laptop 1 (.165) — deploy the writing-studio container
+# =============================================================
+- name: Deploy writing-studio on Laptop 1
+  hosts: laptop1
+  gather_facts: false
+  tags: [writing, deploy]
+
+  vars:
+    writing_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/writing.sops.yml') | from_yaml }}"
+    hive_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/hive.sops.yml') | from_yaml }}"
+    domain: "{{ hive_secrets.domain }}"
+    writing_dir: /opt/writing          # compose project dir == /workspace bind mount
+    writing_git_ssh: /opt/writing-git-ssh
+    writing_host_user: hive            # uid 1000, matching container user writing
+    writing_repo_url: "git@github.com:jjjona/writing.git"
+    writing_web_port: 4711             # host port; current Writing Studio listens on 4974
+
+  tasks:
+    # --- Host prerequisite: git (Alpine minimal install lacks it) ---
+    - name: Ensure git is installed on laptop1 (Alpine)
+      ansible.builtin.command: apk add --no-cache git
+      args:
+        creates: /usr/bin/git
+
+    # Host deployment Git and in-container Git use the same repository-scoped
+    # writable key. Run host Git as uid 1000; never trust this mutable checkout
+    # or its local Git config in root's safe.directory.
+    - name: Create Writing Git SSH directory
+      ansible.builtin.file:
+        path: "{{ writing_git_ssh }}"
+        state: directory
+        owner: "1000"
+        group: "1000"
+        mode: "0700"
+      tags: [checkout]
+
+    - name: Install Writing Git key
+      ansible.builtin.copy:
+        dest: "{{ writing_git_ssh }}/id_ed25519"
+        content: "{{ writing_secrets.writing_deploy_key | trim }}\n"
+        owner: "1000"
+        group: "1000"
+        mode: "0600"
+      no_log: true
+      tags: [checkout]
+
+    - name: Write GitHub SSH config
+      ansible.builtin.copy:
+        dest: "{{ writing_git_ssh }}/config"
+        owner: "1000"
+        group: "1000"
+        mode: "0600"
+        content: |
+          Host github.com
+              HostName github.com
+              User git
+              IdentityFile /home/writing/.ssh/id_ed25519
+              IdentitiesOnly yes
+              StrictHostKeyChecking accept-new
+      tags: [checkout]
+
+    - name: Make the Writing checkout editable by uid 1000
+      ansible.builtin.file:
+        path: "{{ writing_dir }}"
+        state: directory
+        recurse: true
+        owner: "1000"
+        group: "1000"
+      tags: [checkout]
+
+    - name: Read root Git safe directories
+      ansible.builtin.command:
+        argv: [git, config, --global, --get-all, safe.directory]
+      register: root_git_safe_directories
+      changed_when: false
+      failed_when: root_git_safe_directories.rc not in [0, 1]
+      check_mode: false
+      tags: [checkout]
+
+    - name: Remove obsolete root trust for the Writing checkout
+      ansible.builtin.command:
+        argv: [git, config, --global, --fixed-value, --unset-all, safe.directory, "{{ writing_dir }}"]
+      when: writing_dir in root_git_safe_directories.stdout_lines
+      tags: [checkout]
+
+    - name: Remove obsolete root Writing deployment key
+      ansible.builtin.file:
+        path: /root/.ssh/writing_github_ed25519
+        state: absent
+      tags: [checkout]
+
+    - name: Clone Writing repo once as its owner
+      # update:false preserves live, possibly uncommitted fiction and app work.
+      ansible.builtin.git:
+        repo: "{{ writing_repo_url }}"
+        dest: "{{ writing_dir }}"
+        version: main
+        update: false
+        accept_hostkey: true
+        key_file: "{{ writing_git_ssh }}/id_ed25519"
+      become: true
+      become_user: "{{ writing_host_user }}"
+      tags: [checkout]
+
+    - name: Set Git identity for Writing commits
+      ansible.builtin.command:
+        argv: [git, -C, "{{ writing_dir }}", config, "{{ item.k }}", "{{ item.v }}"]
+      become: true
+      become_user: "{{ writing_host_user }}"
+      loop:
+        - { k: user.name, v: "writing-studio" }
+        - { k: user.email, v: "writing-studio@{{ domain }}" }
+      changed_when: false
+      tags: [checkout]
+
+    - name: Exclude Ansible-managed deployment files locally
+      ansible.builtin.copy:
+        dest: "{{ writing_dir }}/.git/info/exclude"
+        owner: "1000"
+        group: "1000"
+        mode: "0644"
+        content: |
+          # Managed by ansible (13-writing.yml) — host-local, never committed.
+          .env
+          docker-compose.override.yml
+          docker-compose.production.yml
+          docker-compose.stage.yml
+      tags: [checkout]
+
+    # The Compose override mounts auth.json from the writing-codex volume while
+    # mounting only its sessions subdirectory in-container. On recovery, restore
+    # this volume before deploying; never replace a missing auth store silently.
+    - name: Ensure the Writing Codex volume exists
+      ansible.builtin.command:
+        argv: [docker, volume, create, writing_writing-codex]
+      register: writing_codex_volume_create
+      changed_when: false
+      tags: [config]
+
+    - name: Find the Writing Codex volume mountpoint
+      ansible.builtin.command:
+        argv: [docker, volume, inspect, --format, "{{ '{{ .Mountpoint }}' }}", writing_writing-codex]
+      register: writing_codex_volume
+      changed_when: false
+      check_mode: false
+      tags: [config]
+
+    - name: Check for restored Codex login
+      ansible.builtin.stat:
+        path: "{{ writing_codex_volume.stdout }}/auth.json"
+      register: writing_codex_auth
+      no_log: true
+      tags: [config]
+
+    - name: Require the restored Codex login before deployment
+      ansible.builtin.assert:
+        that:
+          - writing_codex_auth.stat.isreg | default(false)
+        fail_msg: >-
+          Restore writing_writing-codex (including auth.json) from the encrypted
+          Restic backup before deploying Writing.
+      no_log: true
+      tags: [config]
+
+    # --- Per-system config: .env + traefik/routing override (both gitignored) ---
+    - name: Write writing .env
+      ansible.builtin.copy:
+        dest: "{{ writing_dir }}/.env"
+        content: |
+          # Managed by ansible (13-writing.yml). Per-system config.
+          CODEX_AUTH_FILE=/var/lib/docker/volumes/writing_writing-codex/_data/auth.json
+          WRITING_WEB_PORT={{ writing_web_port }}
+          WRITING_GIT_USER_NAME=writing-studio
+          WRITING_GIT_USER_EMAIL=writing-studio@{{ domain }}
+        owner: "1000"
+        group: "1000"
+        mode: "0600"
+      tags: [config]
+
+    - name: Write docker-compose.override.yml (routing + push key mount)
+      # Auto-loaded by `docker compose up`. traefik-kop (already on laptop1,
+      # BIND_IP 192.168.0.165) reads these labels -> Redis -> Traefik.
+      ansible.builtin.copy:
+        dest: "{{ writing_dir }}/docker-compose.override.yml"
+        content: |
+          # Managed by ansible (13-writing.yml). Host-local, gitignored via
+          # .git/info/exclude. Adapts the current Writing Studio service to
+          # Linux-host authentication, port 4711, and authenticated routing.
+          services:
+            writing:
+              container_name: writing-studio
+              restart: unless-stopped
+              # Dockerfile already uses tini as ENTRYPOINT.
+              init: false
+              ports: !override
+                - "{{ writing_web_port }}:4974"
+              environment:
+                GIT_SSH_COMMAND: ssh -i /home/writing/.ssh/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new
+                GIT_AUTHOR_NAME: ${WRITING_GIT_USER_NAME:-writing-studio}
+                GIT_AUTHOR_EMAIL: ${WRITING_GIT_USER_EMAIL:-writing-studio@{{ domain }}}
+                GIT_COMMITTER_NAME: ${WRITING_GIT_USER_NAME:-writing-studio}
+                GIT_COMMITTER_EMAIL: ${WRITING_GIT_USER_EMAIL:-writing-studio@{{ domain }}}
+              # entrypoints=web (:80) carries the tinyauth forwardAuth, so the
+              # studio (no auth of its own) is shielded exactly like hive. The
+              # Bun dev-server serves /_bun/asset/<hash> URLs Cloudflare would
+              # pin stale -> Cache-Control: no-store, same fix hive needed.
+              labels:
+                - "traefik.enable=true"
+                - "traefik.http.routers.writing.rule=Host(`writing.{{ domain }}`)"
+                - "traefik.http.routers.writing.entrypoints=web"
+                - "traefik.http.services.writing.loadbalancer.server.port={{ writing_web_port }}"
+                - "traefik.http.middlewares.writing-nocache.headers.customResponseHeaders.Cache-Control=no-store"
+                - "traefik.http.routers.writing.middlewares=writing-nocache"
+              volumes: !override
+                - .:/workspace
+                - writing-node-modules:/workspace/node_modules
+                - ${CODEX_AUTH_FILE}:/home/writing/.codex/auth.json:ro
+                - writing-codex:/home/writing/.codex/sessions
+                - writing-state:/state
+                - {{ writing_git_ssh }}:/home/writing/.ssh:ro
+        owner: "1000"
+        group: "1000"
+        mode: "0644"
+      tags: [config]
+
+    - name: Own the clone by the in-container studio uid (1000)
+      ansible.builtin.file:
+        path: "{{ writing_dir }}"
+        state: directory
+        recurse: true
+        owner: "1000"
+        group: "1000"
+      tags: [config]
+
+    # --- Deploy ---
+    - name: Build and start writing-studio (bun install runs at boot)
+      ansible.builtin.command:
+        cmd: docker compose up -d --build
+        chdir: "{{ writing_dir }}"
+      changed_when: true
+
+    - name: Wait for the writing web UI to answer on :{{ writing_web_port }}
+      # First boot runs `bun install` before the server binds; give it room.
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ writing_web_port }}"
+        timeout: 300
+
+    # --- Operator helpers (run after SSHing to Laptop 1) ---
+    # writing-update pulls through the container so Git runs as the uid that owns
+    # /workspace. A restart (not a recreate) reruns the entrypoint while keeping
+    # its auth volumes and container intact. Use writing-rebuild when dependencies
+    # or Dockerfile changed; it also refreshes our generated Dockerfile shim.
+    - name: Install writing-update wrapper (pull + restart, no recreate)
+      ansible.builtin.copy:
+        dest: /usr/local/bin/writing-update
+        owner: root
+        group: root
+        mode: "0755"
+        content: |
+          #!/bin/sh
+          set -eu
+          docker exec -u writing -w /workspace writing-studio git pull --ff-only
+          docker restart writing-studio >/dev/null
+          echo "writing-update: pulled + restarted (container not recreated)."
+          echo "  Dependencies or Dockerfile changed? Run: writing-rebuild"
+      tags: [helpers]
+
+    - name: Install writing-rebuild wrapper (pull + full rebuild/recreate)
+      ansible.builtin.copy:
+        dest: /usr/local/bin/writing-rebuild
+        owner: root
+        group: root
+        mode: "0755"
+        content: |
+          #!/bin/sh
+          set -eu
+          docker exec -u writing -w /workspace writing-studio git pull --ff-only
+
+          cd /opt/writing
+          docker compose up -d --build --force-recreate
+          echo "writing-rebuild: pulled + rebuilt + recreated."
+      tags: [helpers]
+
+    - name: Install writing container shell/exec helper
+      ansible.builtin.copy:
+        dest: /usr/local/bin/writing
+        owner: root
+        group: root
+        mode: "0755"
+        content: |
+          #!/bin/sh
+          set -eu
+          if [ "$#" -eq 0 ]; then
+            exec docker exec -it -u writing -w /workspace writing-studio bash
+          fi
+          exec docker exec -it -u writing -w /workspace writing-studio "$@"
+      tags: [helpers]
+
+    - name: Show writing command reminder on interactive server login
+      ansible.builtin.copy:
+        dest: /etc/profile.d/writing-commands.sh
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by ansible (13-writing.yml). Interactive logins only.
+          case "$-" in
+            *i*)
+              printf '\n\033[1;36mWriting Studio commands:\033[0m\n'
+              printf '  \033[1;32mwriting\033[0m          enter the container at /workspace\n'
+              printf '  \033[1;32mwriting-update\033[0m   pull + restart (no recreate)\n'
+              printf '  \033[1;32mwriting-rebuild\033[0m  pull + rebuild + recreate\n\n'
+              ;;
+          esac
+      tags: [helpers]
+
+    - name: Remove obsolete hourly content auto-commit
+      ansible.builtin.cron:
+        name: writing content auto-commit
+        state: absent
+      tags: [helpers]
+
+    - name: Remove obsolete writing-autocommit helper
+      ansible.builtin.file:
+        path: /usr/local/bin/writing-autocommit
+        state: absent
+      tags: [helpers]
+
+# =============================================================
+# Play B: hive (.167) — register the project descriptor
+# =============================================================
+# Interactive onboarding: a per-project brief under /state/projects/writing/.
+# Writing is handled directly through docker-exec, not Hive's autonomous
+# worktree/branch pipeline.
+- name: Onboard writing into hive
+  hosts: hive
+  gather_facts: false
+  tags: [writing, onboard]
+
+  vars:
+    hive_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/hive.sops.yml') | from_yaml }}"
+    domain: "{{ hive_secrets.domain }}"
+    proj_dir: /root/hive/state/projects/writing
+
+  tasks:
+    - name: Create /state/projects/writing
+      ansible.builtin.file:
+        path: "{{ proj_dir }}"
+        state: directory
+        owner: "1000"
+        group: "1000"
+        mode: "0755"
+
+    - name: Write the writing project brief (AGENTS.md)
+      ansible.builtin.copy:
+        dest: "{{ proj_dir }}/AGENTS.md"
+        owner: "1000"
+        group: "1000"
+        mode: "0644"
+        content: |
+          # Project: writing — Codex Writing Studio
+
+          > **HANDLING MODE — DIRECT CHAT, NOT THE AUTONOMOUS PIPELINE.** Work
+          > interactively in the live checkout. Do not create a worktree, branch,
+          > or merge request unless the operator explicitly asks.
+
+          Repo: `git@github.com:jjjona/writing.git` (private).
+          Container: `writing-studio` on **node-lt1** (192.168.0.165).
+          The checkout is bind-mounted at `/workspace` and served at
+          https://writing.{{ domain }}.
+
+          ## Scope
+
+          Perform only explicitly requested software engineering on `apps/`,
+          `packages/`, `scripts/`, `Dockerfile`, or related tests/configuration.
+          Writing is a Codex-only fiction workflow; do not run its world/story
+          skills or alter `stories/`, `worlds/`, `IDEAS.md`, or `craft/` unless
+          the operator explicitly requests fiction work.
+
+          Read `/workspace/AGENTS.md` before editing. It is authoritative for the
+          current repository and supersedes this transport brief.
+
+          ## Transport
+
+          ```sh
+          ssh -F /state/ssh/config node-lt1 'docker exec -u writing -w /workspace writing-studio <command>'
+          ```
+
+          Edit `/workspace` in place. The Bun server hot-reloads and the operator
+          reviews changes through the production route.
+
+          ## Validation
+
+          ```sh
+          ssh -F /state/ssh/config node-lt1 'docker exec -u writing -w /workspace writing-studio bun run check'
+          ```
+
+          ## Commit and push
+
+          After operator approval, commit and push from inside the container:
+
+          ```sh
+          ssh -F /state/ssh/config node-lt1 'docker exec -u writing -w /workspace writing-studio git push'
+          ```
+
+          `.env` and `docker-compose.override.yml` are Ansible-managed,
+          host-local, and Git-excluded. Never commit or edit them manually.
+
+    - name: Write CLAUDE.md (imports the brief)
+      ansible.builtin.copy:
+        dest: "{{ proj_dir }}/CLAUDE.md"
+        owner: "1000"
+        group: "1000"
+        mode: "0644"
+        content: "@AGENTS.md\n"
+
+# =============================================================
+# Play C: docker-host (.159) — refresh Traefik for the new kop route
+# =============================================================
+# Documented gotcha: Traefik does not re-read traefik-kop/Redis keys republished
+# after its own startup. A new container publishing kop keys needs a Traefik
+# bounce to appear. Brief (seconds) downtime on existing routes.
+- name: Refresh Traefik so it picks up the writing route
+  hosts: docker_host
+  gather_facts: false
+  tags: [writing, traefik]
+
+  tasks:
+    - name: Restart traefik
+      ansible.builtin.command: docker restart traefik
+      changed_when: true

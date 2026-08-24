@@ -505,10 +505,12 @@
         cron_minute: "0"
         paths:
           - /var/lib/docker/volumes/arcane-agent_arcane-data/_data
-          # writing-studio bind-mount clone: stories/seeds/worlds/taste/runs +
-          # tmp/ (human source materials, gitignored) + .git history. Belt-and-
-          # suspenders alongside the hourly GitHub auto-commit (13-writing.yml).
+          # Writing checkout: app, worlds, stories, and Git history. Named
+          # volume state includes the Codex login/sessions and runtime records;
+          # all are required for a complete 13-writing.yml recovery.
           - /opt/writing
+          - /var/lib/docker/volumes/writing_writing-codex/_data
+          - /var/lib/docker/volumes/writing_writing-state/_data
           # todo app data: SQLite task db + ntfy auth/cache (14-todo.yml)
           - /opt/todo-data
         pause_containers:
