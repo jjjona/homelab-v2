@@ -8,8 +8,8 @@
 #
 # Architecture:
 #   - Repo is PRIVATE GitHub jjjona/todo, cloned to /opt/todo and bind-mounted
-#     at /app. Codex and Git run inside the app container as uid 1000; its login
-#     state is a named volume and its deploy key is mounted from the host.
+#     at /app. Codex and Git run inside the app container as uid 1000; Codex
+#     login and writable Git credentials persist in Compose-managed volumes.
 #   - Data (SQLite + ntfy auth/cache) lives in /opt/todo-data, bind-mounted;
 #     backed up nightly by restic (11-laptops.yml laptop_backup.paths).
 #   - Routing: compose labels -> traefik-kop (already on laptop1) -> Redis ->
@@ -40,7 +40,8 @@
     domain: "{{ hive_secrets.domain }}"
     todo_dir: /opt/todo            # git clone == build context and /app bind mount
     todo_data_dir: /opt/todo-data  # SQLite + ntfy state; in restic backup paths
-    todo_git_ssh: /opt/todo-git-ssh
+    todo_deploy_ssh: /opt/todo-deploy-ssh
+    todo_host_user: hive           # uid 1000, matching the container's bun user
     todo_repo_url: "git@github.com:jjjona/todo.git"
     todo_web_port: 4712            # host port; container listens on 3000
     ntfy_web_port: 4713            # host port; container listens on 80
@@ -51,78 +52,82 @@
       args:
         creates: /usr/bin/git
 
-    # --- Deploy key so root can clone/pull the PRIVATE repo (read-only) ---
-    - name: Ensure root ~/.ssh exists
+    # Run deployment Git as the same uid that owns and edits the bind-mounted
+    # checkout. Trusting a uid-1000-owned repository in root's safe.directory
+    # would let mutable Git config influence commands Ansible runs as root.
+    - name: Create host Todo deployment SSH directory
       ansible.builtin.file:
-        path: /root/.ssh
+        path: "{{ todo_deploy_ssh }}"
         state: directory
+        owner: "1000"
+        group: "1000"
         mode: "0700"
+      tags: [checkout]
 
-    - name: Install todo deploy key for root
+    - name: Install Todo deployment Git key
       ansible.builtin.copy:
-        dest: /root/.ssh/todo_github_ed25519
+        dest: "{{ todo_deploy_ssh }}/id_ed25519"
         # | trim + explicit \n: OpenSSH keys need exactly one trailing newline.
         content: "{{ todo_secrets.todo_deploy_key | trim }}\n"
+        owner: "1000"
+        group: "1000"
         mode: "0600"
       no_log: true
+      tags: [checkout]
 
-    - name: Clone/update Todo repo
+    - name: Make the checkout editable by the container user
+      ansible.builtin.file:
+        path: "{{ todo_dir }}"
+        state: directory
+        recurse: true
+        owner: "1000"
+        group: "1000"
+      tags: [checkout]
+
+    - name: Read root Git safe directories
+      ansible.builtin.command:
+        argv: [git, config, --global, --get-all, safe.directory]
+      register: root_git_safe_directories
+      changed_when: false
+      failed_when: root_git_safe_directories.rc not in [0, 1]
+      check_mode: false
+      tags: [checkout]
+
+    - name: Remove obsolete root trust for the Todo checkout
+      ansible.builtin.command:
+        argv: [git, config, --global, --fixed-value, --unset-all, safe.directory, "{{ todo_dir }}"]
+      when: todo_dir in root_git_safe_directories.stdout_lines
+      tags: [checkout]
+
+    - name: Remove obsolete root Todo deployment key
+      ansible.builtin.file:
+        path: /root/.ssh/todo_github_ed25519
+        state: absent
+      tags: [checkout]
+
+    - name: Clone/update Todo repo as its owner
       ansible.builtin.git:
         repo: "{{ todo_repo_url }}"
         dest: "{{ todo_dir }}"
         version: main
         update: true
         accept_hostkey: true
-        key_file: /root/.ssh/todo_github_ed25519
+        key_file: "{{ todo_deploy_ssh }}/id_ed25519"
+      become: true
+      become_user: "{{ todo_host_user }}"
       register: todo_git
+      tags: [checkout]
 
-    - name: Set git identity for Codex commits
+    - name: Set Git identity for Codex commits
       ansible.builtin.command:
-        cmd: git config --file {{ todo_dir }}/.git/config {{ item.k }} "{{ item.v }}"
+        argv: [git, -C, "{{ todo_dir }}", config, "{{ item.k }}", "{{ item.v }}"]
+      become: true
+      become_user: "{{ todo_host_user }}"
       loop:
         - { k: user.name, v: "todo-codex" }
         - { k: user.email, v: "todo-codex@{{ domain }}" }
       changed_when: false
-
-    - name: Keep host-local deployment files out of git status
-      ansible.builtin.copy:
-        dest: "{{ todo_dir }}/.git/info/exclude"
-        content: |
-          # Managed by ansible (14-todo.yml).
-          .env
-          docker-compose.override.yml
-        mode: "0644"
-
-    - name: Create container git SSH directory
-      ansible.builtin.file:
-        path: "{{ todo_git_ssh }}"
-        state: directory
-        owner: "1000"
-        group: "1000"
-        mode: "0700"
-
-    - name: Install Todo deploy key for the container
-      ansible.builtin.copy:
-        dest: "{{ todo_git_ssh }}/id_ed25519"
-        content: "{{ todo_secrets.todo_deploy_key | trim }}\n"
-        owner: "1000"
-        group: "1000"
-        mode: "0600"
-      no_log: true
-
-    - name: Write container SSH config
-      ansible.builtin.copy:
-        dest: "{{ todo_git_ssh }}/config"
-        owner: "1000"
-        group: "1000"
-        mode: "0644"
-        content: |
-          Host github.com
-              HostName github.com
-              User git
-              IdentityFile /home/bun/.ssh/id_ed25519
-              IdentitiesOnly yes
-              StrictHostKeyChecking accept-new
+      tags: [checkout]
 
     # --- Data dirs (bind mounts) ---
     - name: Create todo data dir (SQLite; container runs as uid 1000 "bun")
@@ -156,27 +161,18 @@
           NTFY_USER={{ todo_secrets.ntfy_user }}
           NTFY_PASSWORD={{ todo_secrets.ntfy_password }}
           TZ=Europe/Brussels
+        owner: "1000"
+        group: "1000"
         mode: "0600"
       no_log: true
 
-    - name: Mount the Todo Git credentials into the container
-      ansible.builtin.copy:
-        dest: "{{ todo_dir }}/docker-compose.override.yml"
-        mode: "0644"
-        content: |
-          # Managed by ansible (14-todo.yml).
-          services:
-            todo:
-              volumes:
-                - {{ todo_git_ssh }}:/home/bun/.ssh
-
-    - name: Make the checkout editable by the container user
+    # Current Todo Compose owns todo-codex and todo-ssh named volumes. Remove
+    # the old deployment override so recovery installs match the app repo and
+    # Docker preserves both volumes across container recreation.
+    - name: Remove obsolete Todo Compose override
       ansible.builtin.file:
-        path: "{{ todo_dir }}"
-        state: directory
-        recurse: true
-        owner: "1000"
-        group: "1000"
+        path: "{{ todo_dir }}/docker-compose.override.yml"
+        state: absent
 
     # --- Deploy ---
     - name: Build and start todo + ntfy
@@ -197,25 +193,79 @@
         port: "{{ ntfy_web_port }}"
         timeout: 60
 
+    # The app's todo-ssh named volume starts empty after a recovery. Discover
+    # its Docker-managed mountpoint and seed the same writable deploy key used
+    # by the live container so in-container Git and Codex can pull and push.
+    - name: Find the Todo SSH volume mountpoint
+      ansible.builtin.command:
+        argv: [docker, volume, inspect, --format, "{{ '{{ .Mountpoint }}' }}", todo_todo-ssh]
+      register: todo_ssh_volume
+      changed_when: false
+      check_mode: false
+      tags: [git_credentials]
+
+    - name: Secure the Todo SSH volume
+      ansible.builtin.file:
+        path: "{{ todo_ssh_volume.stdout }}"
+        state: directory
+        owner: "1000"
+        group: "1000"
+        mode: "0700"
+      tags: [git_credentials]
+
+    - name: Install Todo Git key in its persistent volume
+      ansible.builtin.copy:
+        dest: "{{ todo_ssh_volume.stdout }}/id_ed25519"
+        content: "{{ todo_secrets.todo_deploy_key | trim }}\n"
+        owner: "1000"
+        group: "1000"
+        mode: "0600"
+      no_log: true
+      tags: [git_credentials]
+
+    - name: Configure GitHub SSH in the persistent volume
+      ansible.builtin.copy:
+        dest: "{{ todo_ssh_volume.stdout }}/config"
+        owner: "1000"
+        group: "1000"
+        mode: "0600"
+        content: |
+          Host github.com
+              HostName github.com
+              User git
+              IdentityFile /home/bun/.ssh/id_ed25519
+              IdentitiesOnly yes
+              StrictHostKeyChecking accept-new
+      tags: [git_credentials]
+
     # --- ntfy auth: converge the publisher/subscriber user + topic ACL ---
     # auth-default-access=deny-all, so this user is the only way in. The todo
     # server publishes with it; the iPhone ntfy app subscribes with it.
     - name: Ensure ntfy user exists (create or converge password)
       ansible.builtin.shell: |
         set -e
-        if docker exec ntfy ntfy user list 2>&1 | grep -q "^user {{ todo_secrets.ntfy_user }} "; then
-          docker exec -e NTFY_PASSWORD='{{ todo_secrets.ntfy_password }}' ntfy \
-            ntfy user change-pass {{ todo_secrets.ntfy_user }}
+        if docker exec ntfy ntfy user list 2>&1 | grep -Fq "user $NTFY_USER "; then
+          docker exec -e NTFY_PASSWORD ntfy ntfy user change-pass "$NTFY_USER"
         else
-          docker exec -e NTFY_PASSWORD='{{ todo_secrets.ntfy_password }}' ntfy \
-            ntfy user add {{ todo_secrets.ntfy_user }}
+          docker exec -e NTFY_PASSWORD ntfy ntfy user add "$NTFY_USER"
         fi
+      environment:
+        NTFY_USER: "{{ todo_secrets.ntfy_user }}"
+        NTFY_PASSWORD: "{{ todo_secrets.ntfy_password }}"
       no_log: true
       changed_when: true
 
     - name: Grant the user read-write on the topic
       ansible.builtin.command:
-        cmd: docker exec ntfy ntfy access {{ todo_secrets.ntfy_user }} {{ todo_secrets.ntfy_topic }} rw
+        argv:
+          - docker
+          - exec
+          - ntfy
+          - ntfy
+          - access
+          - "{{ todo_secrets.ntfy_user }}"
+          - "{{ todo_secrets.ntfy_topic }}"
+          - rw
       no_log: true
       changed_when: true
 
