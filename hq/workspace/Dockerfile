@@ -17,8 +17,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ./configure --prefix=/usr/local \
     && make -j2 \
     && make install \
-    && npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.84.3 \
     && useradd --create-home --uid 1000 --shell /bin/bash workspace \
+    && su - workspace -c 'npm install -g --ignore-scripts --prefix /home/workspace/.local @earendil-works/pi-coding-agent@0.84.4' \
+    && ln -s /home/workspace/.local/bin/pi /usr/local/bin/pi \
     && rm -rf /var/lib/apt/lists/* /tmp/*
 
 COPY --chown=workspace:workspace project-starter /opt/project-starter

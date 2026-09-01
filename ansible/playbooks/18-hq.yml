@@ -282,18 +282,28 @@
         dest: /usr/local/bin/bun
         state: link
 
-    - name: Install Pi 0.84.3
+    - name: Install user-updatable Pi 0.84.4 baseline
       ansible.builtin.command: >-
-        npm install -g --ignore-scripts --prefix /opt/pi
-        @earendil-works/pi-coding-agent@0.84.3
+        npm install -g --ignore-scripts --prefix {{ hq_home }}/.local
+        @earendil-works/pi-coding-agent@0.84.4
       args:
-        creates: /opt/pi/bin/pi
+        creates: "{{ hq_home }}/.local/bin/pi"
+      become: true
+      become_user: hq
+      environment:
+        HOME: "{{ hq_home }}"
+      register: hq_pi_install
 
     - name: Link Pi
       ansible.builtin.file:
-        src: /opt/pi/bin/pi
+        src: "{{ hq_home }}/.local/bin/pi"
         dest: /usr/local/bin/pi
         state: link
+
+    - name: Remove obsolete root-managed Pi installation
+      ansible.builtin.file:
+        path: /opt/pi
+        state: absent
 
     - name: Install SOPS 3.13.3
       ansible.builtin.get_url:
@@ -613,7 +623,7 @@
         executable: /bin/bash
       become: true
       become_user: hq
-      when: hq_operating_context.changed
+      when: hq_operating_context.changed or hq_pi_install.changed
 
     - name: Install HQ nftables policy
       ansible.builtin.copy:
@@ -650,11 +660,12 @@
         state: restarted
       when: hq_firewall.changed
 
-    - name: Verify pinned tool versions
+    - name: Verify managed tool installations
       ansible.builtin.shell: |
         set -eu
         test "$(bun --version)" = "1.3.14"
-        test "$(pi --version)" = "0.84.3"
+        test "$(readlink -f "$(command -v pi)")" = "$(readlink -f {{ hq_home }}/.local/bin/pi)"
+        pi --version >/dev/null
         test "$(node --version)" = "v22.23.2"
         test "$(tmux -V)" = "tmux 3.5a"
         sops --version >/dev/null
