@@ -569,7 +569,7 @@
         mode: "0600"
         content: |
           [Unit]
-          Description=HQ browser-hosted Pi management terminal
+          Description=HQ browser-hosted management terminal
           After=network-online.target
           Wants=network-online.target
 
@@ -613,12 +613,12 @@
         enabled: true
         state: started
 
-    - name: Reload Pi when HQ-local operating context changes
+    - name: Reload the HQ shell when its managed baseline changes
       ansible.builtin.shell: |
         set -eu
         id=$(bun run {{ project_starter }}/src/project-id.ts {{ homelab_repo }})
         tmux -L "project-$id" -f {{ project_starter }}/config/tmux.conf \
-          respawn-pane -k -t "project-$id" -c {{ homelab_repo }} "exec pi"
+          respawn-pane -k -t "project-$id" -c {{ homelab_repo }} "exec bash"
       args:
         executable: /bin/bash
       become: true
