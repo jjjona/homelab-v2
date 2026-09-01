@@ -63,7 +63,7 @@ The `hive`, `writing`, and `todo` aliases have interactive `RemoteCommand` setti
 7. Apply narrowly from `ansible/` only after required key material and access checks pass.
 8. Verify live state independently and report exact checks and remaining drift.
 
-Do not commit or push unless explicitly requested. Keep commits small and never mix unrelated pre-existing changes into a commit.
+Treat the agent as the manager for this repository. For repo-maintenance requests such as "fix repo", make the smallest safe change, validate it, commit it, and push to Forgejo when checks pass. Keep commits small and never mix unrelated pre-existing changes into a commit. For high-risk infrastructure changes, destructive actions, secret changes, or ambiguous scope, get explicit confirmation before applying or pushing.
 
 ## Status updates
 
