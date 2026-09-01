@@ -523,15 +523,16 @@
         - { source: forgejo-projects.py, dest: hq-project }
         - { source: hq-workspace.py, dest: hq-workspace }
 
-    - name: Install Pi working discipline
+    - name: Install portable Pi working profile
       ansible.builtin.command: ./install.sh
       args:
         chdir: "{{ discipline_repo }}"
-        creates: "{{ hq_home }}/.pi/agent/skills/scope-first"
       become: true
       become_user: hq
       environment:
         PI_CODING_AGENT_DIR: "{{ hq_home }}/.pi/agent"
+      register: hq_profile_install
+      changed_when: "'profile updated' in hq_profile_install.stdout"
 
     - name: Install Project Starter dependencies
       ansible.builtin.command: bun install --frozen-lockfile

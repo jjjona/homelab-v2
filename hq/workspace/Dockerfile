@@ -5,7 +5,7 @@ ARG TMUX_VERSION=3.5a
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       bash build-essential bison ca-certificates curl git libevent-dev \
-      libncurses-dev openssh-client pkg-config unzip xz-utils \
+      libncurses-dev openssh-client pkg-config python3 unzip xz-utils \
     && curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
       | tar -xJ -C /usr/local --strip-components=1 \
     && curl -fsSL "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-x64.zip" -o /tmp/bun.zip \
