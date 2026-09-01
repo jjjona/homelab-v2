@@ -1,0 +1,199 @@
+---
+# Deploy canonical Forgejo repository jjjona/playlists on Laptop 1.
+#
+# UI:  playlists.<domain>     -> Traefik web entrypoint (Tinyauth)
+# API: playlists-api.<domain> -> web-noauth; app bearer token is the gate
+# Data: /opt/playlists-data   -> included in laptop1 restic backups (11-laptops.yml)
+#
+# Run from ansible/: ansible-playbook playbooks/16-playlists.yml
+
+- name: Deploy playlists on Laptop 1
+  hosts: laptop1
+  gather_facts: false
+  tags: [playlists, deploy]
+
+  vars:
+    playlists_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/playlists.sops.yml') | from_yaml }}"
+    hive_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/hive.sops.yml') | from_yaml }}"
+    domain: "{{ hive_secrets.domain }}"
+    playlists_dir: /opt/playlists
+    playlists_data_dir: /opt/playlists-data
+    playlists_deploy_ssh: /opt/playlists-deploy-ssh
+    playlists_repo_url: ssh://git@192.168.0.159:2222/jjjona/playlists.git
+    playlists_host_user: hive
+    playlists_web_port: 4714
+
+  pre_tasks:
+    - name: Wait for SSH connection
+      ansible.builtin.wait_for_connection:
+        timeout: 60
+
+  tasks:
+    - name: Ensure Git is installed
+      community.general.apk:
+        name: git
+        state: present
+
+    - name: Create deployment SSH directory
+      ansible.builtin.file:
+        path: "{{ playlists_deploy_ssh }}"
+        state: directory
+        owner: "1000"
+        group: "1000"
+        mode: "0700"
+
+    - name: Install read-only Forgejo deployment key
+      ansible.builtin.copy:
+        dest: "{{ playlists_deploy_ssh }}/id_ed25519"
+        content: "{{ playlists_secrets.deploy_key | trim }}\n"
+        owner: "1000"
+        group: "1000"
+        mode: "0600"
+      no_log: true
+
+    - name: Pin Forgejo SSH host keys
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../files/forgejo_known_hosts"
+        dest: "{{ playlists_deploy_ssh }}/known_hosts"
+        owner: "1000"
+        group: "1000"
+        mode: "0644"
+
+    - name: Create application checkout directory
+      ansible.builtin.file:
+        path: "{{ playlists_dir }}"
+        state: directory
+        owner: "1000"
+        group: "1000"
+        mode: "0755"
+
+    - name: Clone or update playlists repository
+      ansible.builtin.git:
+        repo: "{{ playlists_repo_url }}"
+        dest: "{{ playlists_dir }}"
+        version: main
+        update: true
+        accept_hostkey: true
+        key_file: "{{ playlists_deploy_ssh }}/id_ed25519"
+        ssh_opts: "-o UserKnownHostsFile={{ playlists_deploy_ssh }}/known_hosts -o StrictHostKeyChecking=yes"
+      become: true
+      become_user: "{{ playlists_host_user }}"
+      register: playlists_git
+
+    - name: Create persistent playlist data directory
+      ansible.builtin.file:
+        path: "{{ playlists_data_dir }}"
+        state: directory
+        owner: "10001"
+        group: "10001"
+        mode: "0750"
+
+    - name: Write deployment environment
+      ansible.builtin.copy:
+        dest: "{{ playlists_dir }}/.env"
+        content: |
+          PLAYLISTS_API_TOKEN={{ playlists_secrets.api_token }}
+          PLAYLISTS_HOST=playlists.{{ domain }}
+          PLAYLISTS_API_HOST=playlists-api.{{ domain }}
+          PLAYLISTS_WEB_PORT={{ playlists_web_port }}
+          PLAYLISTS_DATA_DIR={{ playlists_data_dir }}
+        owner: "1000"
+        group: "1000"
+        mode: "0600"
+      no_log: true
+
+    - name: Build and start playlists
+      ansible.builtin.command:
+        cmd: docker compose --env-file .env -f deploy/compose.homelab.yml up -d --build
+        chdir: "{{ playlists_dir }}"
+      changed_when: true
+
+    - name: Wait for playlist service
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ playlists_web_port }}/healthz"
+        status_code: 200
+        return_content: true
+      register: playlists_health
+      retries: 30
+      delay: 3
+      until: playlists_health.status == 200 and playlists_health.content == "ok\n"
+
+    - name: Verify seeded historical playlist
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ playlists_web_port }}/api/v1/playlists"
+        status_code: 200
+        return_content: true
+      register: playlists_library
+      failed_when: >-
+        playlists_library.status != 200 or
+        (playlists_library.json.playlists | length) < 1 or
+        (playlists_library.json.playlists[0].tracks | length) < 1
+
+    - name: Show deployment status
+      ansible.builtin.debug:
+        msg:
+          - "Playlists is healthy on laptop1:{{ playlists_web_port }}"
+          - "Seeded playlists: {{ playlists_library.json.playlists | length }}"
+          - "Checkout revision: {{ playlists_git.after }}"
+
+- name: Publish playlist routes through Cloudflare and Traefik
+  hosts: docker_host
+  gather_facts: false
+  tags: [playlists, routing]
+
+  vars:
+    core_dir: /mnt/data/docker/core
+    hive_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/hive.sops.yml') | from_yaml }}"
+    domain: "{{ hive_secrets.domain }}"
+
+  tasks:
+    - name: Add playlist Cloudflare tunnel ingress
+      ansible.builtin.blockinfile:
+        path: "{{ core_dir }}/cloudflared/config.yml"
+        marker: "  # {mark} ANSIBLE MANAGED BLOCK playlists"
+        insertbefore: '^  - service: http://traefik:80$'
+        block: |2
+            # Playlist UI uses Tinyauth; the machine API uses its own bearer token.
+            - hostname: playlists-api.{{ domain }}
+              service: http://traefik:81
+            - hostname: playlists.{{ domain }}
+              service: http://traefik:80
+      register: cloudflared_routes
+
+    - name: Restart cloudflared when ingress changed
+      ansible.builtin.command: docker restart cloudflared
+      when: cloudflared_routes.changed
+      changed_when: true
+
+    # traefik-kop writes remote labels to Redis. Traefik needs a restart to
+    # discover newly published keys reliably in this setup.
+    - name: Restart Traefik to discover playlist routes
+      ansible.builtin.command: docker restart traefik
+      changed_when: true
+
+    - name: Wait for playlist API route through Traefik
+      ansible.builtin.uri:
+        url: http://127.0.0.1:81/healthz
+        headers:
+          Host: "playlists-api.{{ domain }}"
+        status_code: 200
+        return_content: true
+      register: routed_health
+      retries: 20
+      delay: 3
+      until: routed_health.status == 200
+
+    - name: Verify playlist UI route is protected by Tinyauth
+      ansible.builtin.uri:
+        url: http://127.0.0.1:80/
+        headers:
+          Host: "playlists.{{ domain }}"
+        follow_redirects: none
+        status_code: [200, 302, 401, 403]
+      register: routed_ui
+
+    - name: Show public routes
+      ansible.builtin.debug:
+        msg:
+          - "UI: https://playlists.{{ domain }} (Tinyauth protected; HTTP {{ routed_ui.status }})"
+          - "Agent API: https://playlists-api.{{ domain }}/api/v1/playlists (bearer token required for writes)"

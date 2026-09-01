@@ -296,6 +296,14 @@
             # (deny-all + user/password) is the gate.
             - hostname: ntfy.{{ secrets.domain }}
               service: http://traefik:81
+            # BEGIN ANSIBLE MANAGED BLOCK playlists
+            # Playlist UI uses Tinyauth; the machine API bypasses SSO and uses
+            # the playlist app's own bearer token.
+            - hostname: playlists-api.{{ secrets.domain }}
+              service: http://traefik:81
+            - hostname: playlists.{{ secrets.domain }}
+              service: http://traefik:80
+            # END ANSIBLE MANAGED BLOCK playlists
             - service: http://traefik:80
         owner: "65532"
         group: "65532"

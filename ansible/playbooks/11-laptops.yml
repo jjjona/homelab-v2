@@ -513,11 +513,14 @@
           - /var/lib/docker/volumes/writing_writing-state/_data
           # todo app data: SQLite task db + ntfy auth/cache (14-todo.yml)
           - /opt/todo-data
+          # playlist metadata imported through the machine API (16-playlists.yml)
+          - /opt/playlists-data
         pause_containers:
           - arcane-edge-agent
           - writing-studio
           - todo
           - ntfy
+          - playlists
       laptop2:
         healthchecks_url: "{{ backup.laptop2_healthchecks_url }}"
         cron_hour: "4"
