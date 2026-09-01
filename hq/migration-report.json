@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "completed_at": "2026-09-01T18:30:00+02:00",
+  "repository_policy": {
+    "canonical": "forgejo",
+    "mirror": "github",
+    "direction": "forgejo-to-github",
+    "managed_repositories": 33,
+    "external_registrations": 1,
+    "active_mirror_errors": 0,
+    "verified_branch_and_tag_refs": 84
+  },
+  "live_checkout_migrations": [
+    "hive",
+    "playlists",
+    "todo",
+    "writing"
+  ],
+  "management_plane": {
+    "vmid": 206,
+    "address": "192.168.0.170",
+    "url": "https://hq.jnrm.eu",
+    "backend_direct_access": "traefik-only",
+    "pi_process": "verified-running"
+  },
+  "workspace_plane": {
+    "vmid": 207,
+    "address": "192.168.0.172",
+    "published_port_range": "46000-46999",
+    "backend_direct_access": "traefik-only",
+    "pilot": "https://project-starter-code.jnrm.eu"
+  },
+  "recovery_verification": {
+    "post_migration_forgejo_backup": "ok",
+    "restored_forgejo_database_integrity": "ok",
+    "restored_bare_repositories_fsck": 34,
+    "hq_state_backup_and_restore": "ok",
+    "workspace_state_backup_and_restore": "ok"
+  },
+  "exceptions": [
+    "niels/katana-mirror is externally owned and was not changed",
+    "project-foundation-design is archived at both ends; its configured push mirror is dormant",
+    "the external laptop Hive checkout has pre-existing dirty state and was not altered beyond its remotes"
+  ]
+}
