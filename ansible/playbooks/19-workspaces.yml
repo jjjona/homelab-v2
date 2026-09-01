@@ -335,28 +335,20 @@
       when: workspace_image.rc != 0
       changed_when: true
 
-    - name: Install traefik-kop stack
-      ansible.builtin.copy:
-        dest: /opt/workspace-kop.yml
-        owner: root
-        group: root
-        mode: "0644"
-        content: |
-          services:
-            traefik-kop:
-              image: ghcr.io/jittering/traefik-kop:latest
-              container_name: workspace-traefik-kop
-              restart: unless-stopped
-              volumes:
-                - /var/run/docker.sock:/var/run/docker.sock:ro
-              environment:
-                - REDIS_ADDR=192.168.0.159:6379
-                - BIND_IP=192.168.0.172
-                - POLL_INTERVAL=5
+    - name: Check for obsolete workspace traefik-kop stack
+      ansible.builtin.stat:
+        path: /opt/workspace-kop.yml
+      register: obsolete_workspace_kop
 
-    - name: Start workspace traefik-kop
-      ansible.builtin.command: docker compose -f /opt/workspace-kop.yml up -d
-      changed_when: false
+    - name: Stop obsolete workspace traefik-kop
+      ansible.builtin.command: docker compose -f /opt/workspace-kop.yml down
+      when: obsolete_workspace_kop.stat.exists
+      changed_when: true
+
+    - name: Remove obsolete workspace traefik-kop definition
+      ansible.builtin.file:
+        path: /opt/workspace-kop.yml
+        state: absent
 
     - name: Install Docker workspace ingress firewall
       ansible.builtin.copy:
@@ -373,6 +365,12 @@
             iptables -I DOCKER-USER 1 -s 192.168.0.159 -p tcp -m conntrack --ctstate NEW --ctorigdstport 46000:46999 -j ACCEPT
           iptables -C DOCKER-USER -p tcp -m conntrack --ctstate NEW --ctorigdstport 46000:46999 -j DROP 2>/dev/null ||
             iptables -A DOCKER-USER -p tcp -m conntrack --ctstate NEW --ctorigdstport 46000:46999 -j DROP
+          # Project Git may reach canonical Forgejo. Block every other new LAN
+          # connection from project containers, including Redis and host SSH.
+          iptables -C DOCKER-USER -s 172.16.0.0/12 -d 192.168.0.159 -p tcp --dport 2222 -m conntrack --ctstate NEW -j ACCEPT 2>/dev/null ||
+            iptables -A DOCKER-USER -s 172.16.0.0/12 -d 192.168.0.159 -p tcp --dport 2222 -m conntrack --ctstate NEW -j ACCEPT
+          iptables -C DOCKER-USER -s 172.16.0.0/12 -d 192.168.0.0/24 -m conntrack --ctstate NEW -j DROP 2>/dev/null ||
+            iptables -A DOCKER-USER -s 172.16.0.0/12 -d 192.168.0.0/24 -m conntrack --ctstate NEW -j DROP
 
     - name: Configure persistent workspace ingress firewall
       ansible.builtin.copy:
@@ -413,9 +411,11 @@
       ansible.builtin.shell: |
         set -eu
         docker image inspect hq-workspace:0.1 >/dev/null
-        docker inspect workspace-traefik-kop >/dev/null
+        test "$(docker ps -aq --filter name=^workspace-traefik-kop$)" = ""
         iptables -C DOCKER-USER -s 192.168.0.159 -p tcp -m conntrack --ctstate NEW --ctorigdstport 46000:46999 -j ACCEPT
         iptables -C DOCKER-USER -p tcp -m conntrack --ctstate NEW --ctorigdstport 46000:46999 -j DROP
+        iptables -C DOCKER-USER -s 172.16.0.0/12 -d 192.168.0.159 -p tcp --dport 2222 -m conntrack --ctstate NEW -j ACCEPT
+        iptables -C DOCKER-USER -s 172.16.0.0/12 -d 192.168.0.0/24 -m conntrack --ctstate NEW -j DROP
         test ! -e /srv/workspaces/keys.txt
         test ! -e /srv/workspaces/gh-hosts.yml
       args:

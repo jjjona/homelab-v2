@@ -191,13 +191,6 @@ def deploy(slug: str, owner: str, port: int, identity: str) -> None:
       - {root}/pi-auth.json:/home/workspace/.pi/agent/auth.json
       - {root}/sessions:/home/workspace/.pi/agent/sessions
       - {root}/runtime:/opt/project-starter/.project-runtime
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.workspace-{slug}.rule=Host(`{slug}-code.jnrm.eu`)"
-      - "traefik.http.routers.workspace-{slug}.entrypoints=web"
-      - "traefik.http.services.workspace-{slug}.loadbalancer.server.port={port}"
-      - "traefik.http.middlewares.workspace-{slug}-nocache.headers.customResponseHeaders.Cache-Control=no-store"
-      - "traefik.http.routers.workspace-{slug}.middlewares=workspace-{slug}-nocache"
 """
     remote(
         f"install -d -o 1000 -g 1000 -m 0700 {root}/sessions {root}/runtime && "
@@ -206,7 +199,34 @@ def deploy(slug: str, owner: str, port: int, identity: str) -> None:
         input_text=compose,
     )
     remote(f"docker compose -f {root}/compose.yml up -d")
-    run(["ssh", "-o", "BatchMode=yes", "docker-host", "docker restart traefik >/dev/null"])
+    route = f"""http:
+  routers:
+    workspace-{slug}:
+      rule: "Host(`{slug}-code.jnrm.eu`)"
+      entryPoints: [web]
+      service: workspace-{slug}
+      middlewares: [workspace-{slug}-nocache]
+  services:
+    workspace-{slug}:
+      loadBalancer:
+        servers:
+          - url: "http://192.168.0.172:{port}"
+  middlewares:
+    workspace-{slug}-nocache:
+      headers:
+        customResponseHeaders:
+          Cache-Control: "no-store"
+"""
+    run(
+        [
+            "ssh",
+            "-o",
+            "BatchMode=yes",
+            "docker-host",
+            f"install -o root -g root -m 0644 /dev/stdin /mnt/data/docker/core/traefik/dynamic/workspace-{slug}.yml",
+        ],
+        input_text=route,
+    )
     curl = shlex.join(
         [
             "curl",
