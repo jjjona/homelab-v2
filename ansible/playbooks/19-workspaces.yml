@@ -335,6 +335,21 @@
       when: workspace_image.rc != 0
       changed_when: true
 
+    - name: Roll updated workspace image out to existing projects
+      ansible.builtin.shell: |
+        set -eu
+        for compose in /srv/workspaces/*/compose.yml; do
+          test -e "$compose" || continue
+          docker compose -f "$compose" up -d --force-recreate
+        done
+      args:
+        executable: /bin/bash
+      when: >-
+        workspace_image_definition.changed or
+        workspace_starter_source.changed or
+        workspace_discipline_source.changed
+      changed_when: true
+
     - name: Check for obsolete workspace traefik-kop stack
       ansible.builtin.stat:
         path: /opt/workspace-kop.yml

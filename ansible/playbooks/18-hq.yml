@@ -434,6 +434,7 @@
         ssh_opts: "-o UserKnownHostsFile={{ hq_home }}/.ssh/known_hosts -o StrictHostKeyChecking=yes"
       become: true
       become_user: hq
+      register: hq_project_starter_source
 
     - name: Clone homelab from Forgejo
       ansible.builtin.git:
@@ -594,7 +595,7 @@
         name: hq
         enabled: true
         state: restarted
-      when: hq_service_unit.changed
+      when: hq_service_unit.changed or hq_project_starter_source.changed
 
     - name: Ensure HQ terminal service is running
       ansible.builtin.systemd:
