@@ -1,6 +1,6 @@
 ---
 # ============================================================================
-# 13-writing.yml — Deploy the Codex Writing Studio (github.com/jjjona/writing)
+# 13-writing.yml — Deploy the Codex Writing Studio from canonical Forgejo.
 # and register its direct-operation brief in Hive.
 #
 # Architecture:
@@ -41,7 +41,7 @@
     writing_dir: /opt/writing          # compose project dir == /workspace bind mount
     writing_git_ssh: /opt/writing-git-ssh
     writing_host_user: hive            # uid 1000, matching container user writing
-    writing_repo_url: "git@github.com:jjjona/writing.git"
+    writing_repo_url: "ssh://git@192.168.0.159:2222/jjjona/writing.git"
     writing_web_port: 4711             # host port; current Writing Studio listens on 4974
 
   tasks:
@@ -73,19 +73,30 @@
       no_log: true
       tags: [checkout]
 
-    - name: Write GitHub SSH config
+    - name: Pin Forgejo SSH host keys
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../files/forgejo_known_hosts"
+        dest: "{{ writing_git_ssh }}/known_hosts"
+        owner: "1000"
+        group: "1000"
+        mode: "0644"
+      tags: [checkout]
+
+    - name: Write Forgejo SSH config
       ansible.builtin.copy:
         dest: "{{ writing_git_ssh }}/config"
         owner: "1000"
         group: "1000"
         mode: "0600"
         content: |
-          Host github.com
-              HostName github.com
+          Host 192.168.0.159
+              HostName 192.168.0.159
+              Port 2222
               User git
               IdentityFile /home/writing/.ssh/id_ed25519
               IdentitiesOnly yes
-              StrictHostKeyChecking accept-new
+              UserKnownHostsFile /home/writing/.ssh/known_hosts
+              StrictHostKeyChecking yes
       tags: [checkout]
 
     - name: Make the Writing checkout editable by uid 1000
@@ -127,6 +138,7 @@
         update: false
         accept_hostkey: true
         key_file: "{{ writing_git_ssh }}/id_ed25519"
+        ssh_opts: "-o UserKnownHostsFile={{ writing_git_ssh }}/known_hosts -o StrictHostKeyChecking=yes"
       become: true
       become_user: "{{ writing_host_user }}"
       tags: [checkout]
@@ -394,7 +406,8 @@
           > interactively in the live checkout. Do not create a worktree, branch,
           > or merge request unless the operator explicitly asks.
 
-          Repo: `git@github.com:jjjona/writing.git` (private).
+          Repo: `ssh://git@192.168.0.159:2222/jjjona/writing.git` (private,
+          canonical Forgejo; mirrored one-way to GitHub).
           Container: `writing-studio` on **node-lt1** (192.168.0.165).
           The checkout is bind-mounted at `/workspace` and served at
           https://writing.{{ domain }}.

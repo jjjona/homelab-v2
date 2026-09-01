@@ -1,0 +1,225 @@
+---
+# Converge existing live application checkouts from GitHub to canonical Forgejo.
+# This changes only Git credentials/config and origin URLs; it does not restart,
+# rebuild, or recreate an application. GitHub mirrors are owned by Forgejo.
+
+- name: Move Laptop 1 application remotes to Forgejo
+  hosts: laptop1
+  gather_facts: false
+  tags: [forgejo, migration]
+
+  vars:
+    writing_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/writing.sops.yml') | from_yaml }}"
+    todo_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/todo.sops.yml') | from_yaml }}"
+    playlists_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/playlists.sops.yml') | from_yaml }}"
+    repos:
+      - name: writing
+        path: /opt/writing
+        ssh_dir: /opt/writing-git-ssh
+        key: "{{ writing_secrets.writing_deploy_key }}"
+        remote: ssh://git@192.168.0.159:2222/jjjona/writing.git
+      - name: todo
+        path: /opt/todo
+        ssh_dir: /opt/todo-deploy-ssh
+        key: "{{ todo_secrets.todo_deploy_key }}"
+        remote: ssh://git@192.168.0.159:2222/jjjona/todo.git
+      - name: playlists
+        path: /opt/playlists
+        ssh_dir: /opt/playlists-deploy-ssh
+        key: "{{ playlists_secrets.deploy_key }}"
+        remote: ssh://git@192.168.0.159:2222/jjjona/playlists.git
+
+  tasks:
+    - name: Install Forgejo deployment keys
+      ansible.builtin.copy:
+        dest: "{{ item.ssh_dir }}/id_ed25519"
+        content: "{{ item.key | trim }}\n"
+        owner: "1000"
+        group: "1000"
+        mode: "0600"
+      loop: "{{ repos }}"
+      loop_control:
+        label: "{{ item.name }}"
+      no_log: true
+
+    - name: Pin Forgejo SSH host keys
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../files/forgejo_known_hosts"
+        dest: "{{ item.ssh_dir }}/known_hosts"
+        owner: "1000"
+        group: "1000"
+        mode: "0644"
+      loop: "{{ repos }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Point application origins at Forgejo
+      ansible.builtin.command:
+        argv: [git, -C, "{{ item.path }}", remote, set-url, origin, "{{ item.remote }}"]
+      become: true
+      become_user: hive
+      loop: "{{ repos }}"
+      loop_control:
+        label: "{{ item.name }}"
+      changed_when: false
+
+    - name: Find Todo SSH volume mountpoint
+      ansible.builtin.command:
+        argv: [docker, volume, inspect, --format, "{{ '{{ .Mountpoint }}' }}", todo_todo-ssh]
+      register: todo_ssh_volume
+      changed_when: false
+      check_mode: false
+
+    - name: Install Todo Forgejo key in persistent volume
+      ansible.builtin.copy:
+        dest: "{{ todo_ssh_volume.stdout }}/id_ed25519"
+        content: "{{ todo_secrets.todo_deploy_key | trim }}\n"
+        owner: "1000"
+        group: "1000"
+        mode: "0600"
+      no_log: true
+
+    - name: Pin Todo Forgejo host keys in persistent volume
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../files/forgejo_known_hosts"
+        dest: "{{ todo_ssh_volume.stdout }}/known_hosts"
+        owner: "1000"
+        group: "1000"
+        mode: "0644"
+
+    - name: Configure Todo container SSH for Forgejo
+      ansible.builtin.copy:
+        dest: "{{ todo_ssh_volume.stdout }}/config"
+        owner: "1000"
+        group: "1000"
+        mode: "0600"
+        content: |
+          Host 192.168.0.159
+              HostName 192.168.0.159
+              Port 2222
+              User git
+              IdentityFile /home/bun/.ssh/id_ed25519
+              IdentitiesOnly yes
+              UserKnownHostsFile /home/bun/.ssh/known_hosts
+              StrictHostKeyChecking yes
+
+    - name: Verify application Forgejo refs with their deployment keys
+      ansible.builtin.command:
+        argv:
+          - git
+          - -c
+          - "core.sshCommand=ssh -i {{ item.ssh_dir }}/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile={{ item.ssh_dir }}/known_hosts -o StrictHostKeyChecking=yes"
+          - -C
+          - "{{ item.path }}"
+          - ls-remote
+          - origin
+          - HEAD
+      become: true
+      become_user: hive
+      loop: "{{ repos }}"
+      loop_control:
+        label: "{{ item.name }}"
+      changed_when: false
+
+- name: Move Hive remote to Forgejo
+  hosts: hive
+  gather_facts: false
+  tags: [forgejo, migration]
+
+  vars:
+    hive_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/hive.sops.yml') | from_yaml }}"
+    hive_repo: /opt/hive
+    hive_state_dir: /root/hive/state
+    hive_remote: ssh://git@192.168.0.159:2222/jjjona/hive.git
+
+  tasks:
+    - name: Install root Forgejo deployment key
+      ansible.builtin.copy:
+        dest: /root/.ssh/hive_forgejo_ed25519
+        content: "{{ hive_secrets.hive_forgejo_deploy_key | trim }}\n"
+        mode: "0600"
+      no_log: true
+
+    - name: Pin root Forgejo SSH host keys
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../files/forgejo_known_hosts"
+        dest: /root/.ssh/forgejo_known_hosts
+        mode: "0644"
+
+    - name: Configure root SSH for Forgejo
+      ansible.builtin.blockinfile:
+        path: /root/.ssh/config
+        create: true
+        mode: "0600"
+        marker: "# {mark} ANSIBLE MANAGED — hive forgejo deploy key"
+        block: |
+          Host 192.168.0.159
+              HostName 192.168.0.159
+              Port 2222
+              User git
+              IdentityFile /root/.ssh/hive_forgejo_ed25519
+              IdentitiesOnly yes
+              UserKnownHostsFile /root/.ssh/forgejo_known_hosts
+              StrictHostKeyChecking yes
+
+    - name: Remove obsolete root GitHub SSH block
+      ansible.builtin.blockinfile:
+        path: /root/.ssh/config
+        marker: "# {mark} ANSIBLE MANAGED — hive github deploy key"
+        state: absent
+
+    - name: Seed in-container Forgejo SSH directory
+      ansible.builtin.file:
+        path: "{{ hive_state_dir }}/git-ssh"
+        state: directory
+        owner: "1000"
+        group: "1000"
+        mode: "0700"
+
+    - name: Install in-container Forgejo deployment key
+      ansible.builtin.copy:
+        dest: "{{ hive_state_dir }}/git-ssh/id_forgejo"
+        content: "{{ hive_secrets.hive_forgejo_deploy_key | trim }}\n"
+        owner: "1000"
+        group: "1000"
+        mode: "0600"
+      no_log: true
+
+    - name: Pin in-container Forgejo SSH host keys
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../files/forgejo_known_hosts"
+        dest: "{{ hive_state_dir }}/git-ssh/known_hosts"
+        owner: "1000"
+        group: "1000"
+        mode: "0644"
+
+    - name: Configure in-container SSH for Forgejo
+      ansible.builtin.copy:
+        dest: "{{ hive_state_dir }}/git-ssh/config"
+        owner: "1000"
+        group: "1000"
+        mode: "0600"
+        content: |
+          Host 192.168.0.159
+              HostName 192.168.0.159
+              Port 2222
+              User git
+              IdentityFile /home/hive/.ssh/id_forgejo
+              IdentitiesOnly yes
+              UserKnownHostsFile /home/hive/.ssh/known_hosts
+              StrictHostKeyChecking yes
+
+    - name: Point Hive origin at Forgejo
+      ansible.builtin.command:
+        argv: [git, -C, "{{ hive_repo }}", remote, set-url, origin, "{{ hive_remote }}"]
+      changed_when: false
+
+    - name: Verify root can read the canonical Hive ref
+      ansible.builtin.command:
+        argv: [git, -C, "{{ hive_repo }}", ls-remote, origin, HEAD]
+      changed_when: false
+
+    - name: Verify the running Hive container can read the canonical ref
+      ansible.builtin.command:
+        argv: [docker, exec, hive, git, -C, /app, ls-remote, origin, HEAD]
+      changed_when: false

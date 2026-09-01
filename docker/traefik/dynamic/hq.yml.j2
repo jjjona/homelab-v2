@@ -1,0 +1,19 @@
+http:
+  routers:
+    hq:
+      rule: "Host(`hq.{{ domain }}`)"
+      entryPoints:
+        - web
+      service: hq
+      middlewares:
+        - hq-no-store
+  services:
+    hq:
+      loadBalancer:
+        servers:
+          - url: "http://192.168.0.170:4484"
+  middlewares:
+    hq-no-store:
+      headers:
+        customResponseHeaders:
+          Cache-Control: "no-store"

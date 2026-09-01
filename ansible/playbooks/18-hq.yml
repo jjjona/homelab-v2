@@ -1,0 +1,651 @@
+---
+# Dedicated management plane for hq.<domain>.
+# The unprivileged LXC runs Pi against the homelab checkout. Its browser service
+# trusts Tinyauth's identity header only from Traefik; nftables rejects every
+# direct connection to the terminal port from other hosts.
+
+- name: Register the HQ management key with Forgejo
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [hq, forgejo]
+
+  vars:
+    hq_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/hq.sops.yml') | from_yaml }}"
+    forgejo_api: http://192.168.0.159:3001/api/v1
+
+  tasks:
+    - name: List current Forgejo user keys
+      ansible.builtin.uri:
+        url: "{{ forgejo_api }}/user/keys"
+        headers:
+          Authorization: "token {{ hq_secrets.forgejo_api_token }}"
+        return_content: true
+      register: forgejo_keys
+      no_log: true
+
+    - name: Register the HQ management SSH key
+      ansible.builtin.uri:
+        url: "{{ forgejo_api }}/user/keys"
+        method: POST
+        headers:
+          Authorization: "token {{ hq_secrets.forgejo_api_token }}"
+        body_format: json
+        body:
+          title: hq-management
+          key: "{{ hq_secrets.hq_ssh_public_key }}"
+          read_only: false
+        status_code: 201
+      when: >-
+        (forgejo_keys.json | selectattr('title', 'equalto', 'hq-management') | list | length) == 0
+      no_log: true
+
+- name: Create the HQ LXC
+  hosts: proxmox
+  gather_facts: false
+  tags: [hq, create]
+
+  vars:
+    ct_id: 206
+    ct_hostname: hq
+    ct_ip: 192.168.0.170
+    ct_gateway: 192.168.0.1
+    ct_memory: 3072
+    ct_swap: 1024
+    ct_cores: 2
+    ct_rootfs_size: 24
+    ct_template: debian-12-standard_12.12-1_amd64.tar.zst
+    controller_ssh_pubkey: "{{ lookup('file', lookup('env', 'HOME') + '/.ssh/id_ed25519.pub') }}"
+
+  tasks:
+    - name: Check whether HQ LXC exists
+      ansible.builtin.command: pct status {{ ct_id }}
+      register: hq_ct
+      failed_when: false
+      changed_when: false
+
+    - name: Check whether the proposed HQ address answers
+      ansible.builtin.command: ping -c 1 -W 1 {{ ct_ip }}
+      register: hq_ip
+      failed_when: false
+      changed_when: false
+      when: hq_ct.rc != 0
+
+    - name: Require an unused HQ address
+      ansible.builtin.assert:
+        that: hq_ip.rc != 0
+        fail_msg: "{{ ct_ip }} answered while LXC {{ ct_id }} is absent; allocate another address before creating HQ."
+      when: hq_ct.rc != 0
+
+    - name: Ensure Debian container template is available
+      ansible.builtin.command: pveam download local {{ ct_template }}
+      register: hq_template
+      changed_when: "'already exists' not in hq_template.stdout"
+      failed_when:
+        - hq_template.rc != 0
+        - "'already exists' not in hq_template.stderr"
+      when: hq_ct.rc != 0
+
+    - name: Stage controller SSH public key
+      ansible.builtin.copy:
+        dest: /tmp/hq-controller.pub
+        content: "{{ controller_ssh_pubkey | trim }}\n"
+        mode: "0600"
+      when: hq_ct.rc != 0
+
+    - name: Create unprivileged HQ LXC
+      ansible.builtin.command: >-
+        pct create {{ ct_id }} local:vztmpl/{{ ct_template }}
+        --hostname {{ ct_hostname }}
+        --unprivileged 1
+        --rootfs local-lvm:{{ ct_rootfs_size }}
+        --memory {{ ct_memory }}
+        --swap {{ ct_swap }}
+        --cores {{ ct_cores }}
+        --net0 name=eth0,bridge=vmbr0,ip={{ ct_ip }}/24,gw={{ ct_gateway }},firewall=0
+        --nameserver 1.1.1.1
+        --onboot 1
+        --start 1
+        --ssh-public-keys /tmp/hq-controller.pub
+      when: hq_ct.rc != 0
+
+    - name: Remove staged controller SSH key
+      ansible.builtin.file:
+        path: /tmp/hq-controller.pub
+        state: absent
+
+    - name: Ensure HQ LXC is running
+      ansible.builtin.command: pct start {{ ct_id }}
+      register: hq_start
+      failed_when:
+        - hq_start.rc != 0
+        - "'already running' not in hq_start.stderr"
+      changed_when: hq_start.rc == 0
+
+    - name: Wait for HQ systemd
+      ansible.builtin.command: pct exec {{ ct_id }} -- systemctl is-system-running --wait
+      register: hq_systemd
+      retries: 18
+      delay: 5
+      until: hq_systemd.rc == 0 or 'running' in hq_systemd.stdout
+      changed_when: false
+
+- name: Provision HQ management environment
+  hosts: hq
+  gather_facts: true
+  tags: [hq, provision]
+
+  vars:
+    hq_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/hq.sops.yml') | from_yaml }}"
+    forgejo_base: ssh://git@192.168.0.159:2222/jjjona
+    hq_home: /home/hq
+    project_starter: /opt/hq/project-starter
+    homelab_repo: /opt/homelab
+    discipline_repo: /opt/hq/pi-working-discipline
+    controller_age_key_file: >-
+      {{ lookup('env', 'SOPS_AGE_KEY_FILE') | default(lookup('env', 'HOME') + '/.config/sops/age/keys.txt', true) }}
+    controller_pi_auth_file: "{{ lookup('env', 'HOME') }}/.pi/agent/auth.json"
+    controller_gh_auth_file: "{{ lookup('env', 'HOME') }}/.config/gh/hosts.yml"
+
+  pre_tasks:
+    - name: Require local credential sources without reading them
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      delegate_to: localhost
+      become: false
+      register: credential_sources
+      loop:
+        - "{{ controller_age_key_file }}"
+        - "{{ controller_pi_auth_file }}"
+        - "{{ controller_gh_auth_file }}"
+
+    - name: Stop when a required HQ credential source is absent
+      ansible.builtin.assert:
+        that: item.stat.isreg | default(false)
+        fail_msg: "Required HQ credential source is absent on the controller: {{ item.item }}"
+      loop: "{{ credential_sources.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+  tasks:
+    - name: Install HQ system and build packages
+      ansible.builtin.apt:
+        name:
+          - age
+          - bash
+          - build-essential
+          - bison
+          - ca-certificates
+          - curl
+          - git
+          - libevent-dev
+          - libncurses-dev
+          - nftables
+          - pkg-config
+          - python3
+          - python3-pip
+          - unzip
+          - xz-utils
+        state: present
+        update_cache: true
+
+    - name: Create HQ service account
+      ansible.builtin.user:
+        name: hq
+        uid: "1000"
+        shell: /bin/bash
+        create_home: true
+        state: present
+
+    - name: Download tmux source
+      ansible.builtin.get_url:
+        url: https://github.com/tmux/tmux/releases/download/3.5a/tmux-3.5a.tar.gz
+        dest: /tmp/tmux-3.5a.tar.gz
+        mode: "0644"
+
+    - name: Unpack tmux source
+      ansible.builtin.unarchive:
+        src: /tmp/tmux-3.5a.tar.gz
+        dest: /tmp
+        remote_src: true
+      args:
+        creates: /tmp/tmux-3.5a/configure
+
+    - name: Build tmux 3.5a
+      ansible.builtin.shell: ./configure --prefix=/usr/local && make -j2 && make install
+      args:
+        chdir: /tmp/tmux-3.5a
+        creates: /usr/local/bin/tmux
+
+    - name: Create local fact directory
+      ansible.builtin.file:
+        path: /etc/ansible/facts.d
+        state: directory
+        mode: "0755"
+
+    - name: Record pinned tmux version
+      ansible.builtin.copy:
+        dest: /etc/ansible/facts.d/hq.fact
+        mode: "0644"
+        content: |
+          [hq]
+          tmux=3.5a
+
+    - name: Download Node.js 22.23.2
+      ansible.builtin.get_url:
+        url: https://nodejs.org/dist/v22.23.2/node-v22.23.2-linux-x64.tar.xz
+        dest: /tmp/node-v22.23.2-linux-x64.tar.xz
+        mode: "0644"
+
+    - name: Install Node.js 22.23.2
+      ansible.builtin.unarchive:
+        src: /tmp/node-v22.23.2-linux-x64.tar.xz
+        dest: /opt
+        remote_src: true
+      args:
+        creates: /opt/node-v22.23.2-linux-x64/bin/node
+
+    - name: Link Node.js commands
+      ansible.builtin.file:
+        src: "/opt/node-v22.23.2-linux-x64/bin/{{ item }}"
+        dest: "/usr/local/bin/{{ item }}"
+        state: link
+      loop: [node, npm, npx, corepack]
+
+    - name: Download Bun 1.3.14
+      ansible.builtin.get_url:
+        url: https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-x64.zip
+        dest: /tmp/bun-linux-x64.zip
+        mode: "0644"
+
+    - name: Install Bun 1.3.14
+      ansible.builtin.unarchive:
+        src: /tmp/bun-linux-x64.zip
+        dest: /opt
+        remote_src: true
+      args:
+        creates: /opt/bun-linux-x64/bun
+
+    - name: Link Bun
+      ansible.builtin.file:
+        src: /opt/bun-linux-x64/bun
+        dest: /usr/local/bin/bun
+        state: link
+
+    - name: Install Pi 0.84.3
+      ansible.builtin.command: >-
+        npm install -g --ignore-scripts --prefix /opt/pi
+        @earendil-works/pi-coding-agent@0.84.3
+      args:
+        creates: /opt/pi/bin/pi
+
+    - name: Link Pi
+      ansible.builtin.file:
+        src: /opt/pi/bin/pi
+        dest: /usr/local/bin/pi
+        state: link
+
+    - name: Install SOPS 3.13.3
+      ansible.builtin.get_url:
+        url: https://github.com/getsops/sops/releases/download/v3.13.3/sops-v3.13.3.linux.amd64
+        dest: /usr/local/bin/sops
+        mode: "0755"
+
+    - name: Install Ansible Core 2.19.3
+      ansible.builtin.command: python3 -m pip install --break-system-packages ansible-core==2.19.3
+      args:
+        creates: /usr/local/bin/ansible-playbook
+
+    - name: Create HQ directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: hq
+        group: hq
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: /opt/hq, mode: "0755" }
+        - { path: "{{ hq_home }}/.ssh", mode: "0700" }
+        - { path: "{{ hq_home }}/.config/sops/age", mode: "0700" }
+        - { path: "{{ hq_home }}/.config/gh", mode: "0700" }
+        - { path: "{{ hq_home }}/.pi/agent", mode: "0700" }
+
+    - name: Install HQ outbound management key
+      ansible.builtin.copy:
+        dest: "{{ hq_home }}/.ssh/id_ed25519"
+        content: "{{ hq_secrets.hq_ssh_private_key | trim }}\n"
+        owner: hq
+        group: hq
+        mode: "0600"
+      no_log: true
+
+    - name: Install HQ public management key
+      ansible.builtin.copy:
+        dest: "{{ hq_home }}/.ssh/id_ed25519.pub"
+        content: "{{ hq_secrets.hq_ssh_public_key | trim }}\n"
+        owner: hq
+        group: hq
+        mode: "0644"
+
+    - name: Pin Forgejo SSH host keys
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../files/forgejo_known_hosts"
+        dest: "{{ hq_home }}/.ssh/known_hosts"
+        owner: hq
+        group: hq
+        mode: "0644"
+
+    - name: Configure HQ SSH aliases
+      ansible.builtin.copy:
+        dest: "{{ hq_home }}/.ssh/config"
+        owner: hq
+        group: hq
+        mode: "0600"
+        content: |
+          Host forgejo
+              HostName 192.168.0.159
+              Port 2222
+              User git
+              IdentityFile ~/.ssh/id_ed25519
+              IdentitiesOnly yes
+              UserKnownHostsFile ~/.ssh/known_hosts
+              StrictHostKeyChecking yes
+          Host proxmox
+              HostName 192.168.0.158
+              User root
+              IdentityFile ~/.ssh/id_ed25519
+              IdentitiesOnly yes
+              StrictHostKeyChecking accept-new
+          Host docker-host
+              HostName 192.168.0.159
+              User root
+              IdentityFile ~/.ssh/id_ed25519
+              IdentitiesOnly yes
+              StrictHostKeyChecking accept-new
+          Host laptop1
+              HostName 192.168.0.165
+              User root
+              IdentityFile ~/.ssh/id_ed25519
+              IdentitiesOnly yes
+              StrictHostKeyChecking accept-new
+          Host laptop2
+              HostName 192.168.0.166
+              User root
+              IdentityFile ~/.ssh/id_ed25519
+              IdentitiesOnly yes
+              StrictHostKeyChecking accept-new
+          Host hive
+              HostName 192.168.0.167
+              User root
+              IdentityFile ~/.ssh/id_ed25519
+              IdentitiesOnly yes
+              StrictHostKeyChecking accept-new
+
+    - name: Restore controller Age identity to HQ
+      ansible.builtin.copy:
+        src: "{{ controller_age_key_file }}"
+        dest: "{{ hq_home }}/.config/sops/age/keys.txt"
+        owner: hq
+        group: hq
+        mode: "0600"
+      no_log: true
+
+    - name: Restore Pi provider authentication to HQ
+      ansible.builtin.copy:
+        src: "{{ controller_pi_auth_file }}"
+        dest: "{{ hq_home }}/.pi/agent/auth.json"
+        owner: hq
+        group: hq
+        mode: "0600"
+      no_log: true
+
+    - name: Restore GitHub CLI authentication to HQ
+      ansible.builtin.copy:
+        src: "{{ controller_gh_auth_file }}"
+        dest: "{{ hq_home }}/.config/gh/hosts.yml"
+        owner: hq
+        group: hq
+        mode: "0600"
+      no_log: true
+
+    - name: Clone Project Starter from Forgejo
+      ansible.builtin.git:
+        repo: "{{ forgejo_base }}/project-starter.git"
+        dest: "{{ project_starter }}"
+        version: main
+        key_file: "{{ hq_home }}/.ssh/id_ed25519"
+        ssh_opts: "-o UserKnownHostsFile={{ hq_home }}/.ssh/known_hosts -o StrictHostKeyChecking=yes"
+      become: true
+      become_user: hq
+
+    - name: Clone homelab from Forgejo
+      ansible.builtin.git:
+        repo: "{{ forgejo_base }}/homelab-v2.git"
+        dest: "{{ homelab_repo }}"
+        version: main
+        key_file: "{{ hq_home }}/.ssh/id_ed25519"
+        ssh_opts: "-o UserKnownHostsFile={{ hq_home }}/.ssh/known_hosts -o StrictHostKeyChecking=yes"
+      become: true
+      become_user: hq
+
+    - name: Install controller homelab operating instructions
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../AGENTS.md"
+        dest: "{{ homelab_repo }}/AGENTS.md"
+        owner: hq
+        group: hq
+        mode: "0644"
+
+    - name: Clone Pi working discipline from Forgejo
+      ansible.builtin.git:
+        repo: "{{ forgejo_base }}/pi-working-discipline.git"
+        dest: "{{ discipline_repo }}"
+        version: main
+        key_file: "{{ hq_home }}/.ssh/id_ed25519"
+        ssh_opts: "-o UserKnownHostsFile={{ hq_home }}/.ssh/known_hosts -o StrictHostKeyChecking=yes"
+      become: true
+      become_user: hq
+
+    - name: Install Pi working discipline
+      ansible.builtin.command: ./install.sh
+      args:
+        chdir: "{{ discipline_repo }}"
+        creates: "{{ hq_home }}/.pi/agent/skills/scope-first"
+      become: true
+      become_user: hq
+      environment:
+        PI_CODING_AGENT_DIR: "{{ hq_home }}/.pi/agent"
+
+    - name: Install Project Starter dependencies
+      ansible.builtin.command: bun install --frozen-lockfile
+      args:
+        chdir: "{{ project_starter }}"
+        creates: "{{ project_starter }}/node_modules/@xterm/xterm"
+      become: true
+      become_user: hq
+
+    - name: Build Project Starter browser assets
+      ansible.builtin.command: bun run build
+      args:
+        chdir: "{{ project_starter }}"
+      become: true
+      become_user: hq
+      changed_when: true
+
+    - name: Install Ansible collections used by the homelab
+      ansible.builtin.command: >-
+        ansible-galaxy collection install
+        community.sops:2.4.0 community.general ansible.posix
+      changed_when: false
+
+    - name: Authorize HQ management key on the HQ container
+      ansible.posix.authorized_key:
+        user: hq
+        key: "{{ hq_secrets.hq_ssh_public_key }}"
+        state: present
+
+    - name: Configure HQ terminal service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/hq.service
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          [Unit]
+          Description=HQ browser-hosted Pi management terminal
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=oneshot
+          User=hq
+          Group=hq
+          WorkingDirectory={{ project_starter }}
+          Environment=HOME={{ hq_home }}
+          Environment=PATH=/usr/local/bin:/usr/bin:/bin
+          Environment=PROJECT_WORKSPACE_ROOT={{ homelab_repo }}
+          Environment=PROJECT_PUBLIC_ORIGIN=https://hq.jnrm.eu
+          Environment=PROJECT_AUTH_IDENTITY={{ hq_secrets.hq_allowed_email }}
+          Environment=PROJECT_BIND_HOST=0.0.0.0
+          Environment=PROJECT_PORT=4484
+          Environment=PROJECT_NO_OPEN=1
+          ExecStart={{ project_starter }}/project start
+          ExecStop={{ project_starter }}/project stop
+          RemainAfterExit=yes
+
+          [Install]
+          WantedBy=multi-user.target
+      no_log: true
+      register: hq_service_unit
+
+    - name: Reload systemd for HQ service
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: hq_service_unit.changed
+
+    - name: Start HQ terminal service
+      ansible.builtin.systemd:
+        name: hq
+        enabled: true
+        state: restarted
+      when: hq_service_unit.changed
+
+    - name: Ensure HQ terminal service is running
+      ansible.builtin.systemd:
+        name: hq
+        enabled: true
+        state: started
+
+    - name: Install HQ nftables policy
+      ansible.builtin.copy:
+        dest: /etc/nftables.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          #!/usr/sbin/nft -f
+          flush ruleset
+          table inet filter {
+            chain input {
+              type filter hook input priority 0; policy drop;
+              iifname "lo" accept
+              ct state established,related accept
+              ip protocol icmp accept
+              ip6 nexthdr ipv6-icmp accept
+              ip saddr 192.168.0.0/24 tcp dport 22 accept
+              ip saddr 192.168.0.159 tcp dport 4484 accept
+            }
+            chain forward { type filter hook forward priority 0; policy drop; }
+            chain output { type filter hook output priority 0; policy accept; }
+          }
+      register: hq_firewall
+
+    - name: Validate HQ nftables policy
+      ansible.builtin.command: nft -c -f /etc/nftables.conf
+      changed_when: false
+
+    - name: Enable and apply HQ nftables policy
+      ansible.builtin.systemd:
+        name: nftables
+        enabled: true
+        state: restarted
+      when: hq_firewall.changed
+
+    - name: Verify pinned tool versions
+      ansible.builtin.shell: |
+        set -eu
+        test "$(bun --version)" = "1.3.14"
+        test "$(pi --version)" = "0.84.3"
+        test "$(node --version)" = "v22.23.2"
+        test "$(tmux -V)" = "tmux 3.5a"
+        sops --version >/dev/null
+        ansible-playbook --version >/dev/null
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+- name: Authorize HQ on managed hosts
+  hosts: proxmox,docker_host,laptop1,laptop2,hive
+  gather_facts: false
+  tags: [hq, access]
+
+  vars:
+    hq_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/hq.sops.yml') | from_yaml }}"
+
+  tasks:
+    - name: Authorize source-pinned HQ management key for root
+      ansible.posix.authorized_key:
+        user: root
+        key: "{{ hq_secrets.hq_ssh_public_key }}"
+        key_options: 'from="192.168.0.170"'
+        state: present
+
+- name: Publish and verify HQ route
+  hosts: docker_host
+  gather_facts: false
+  tags: [hq, routing]
+
+  vars:
+    hive_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/hive.sops.yml') | from_yaml }}"
+    hq_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/hq.sops.yml') | from_yaml }}"
+    core_dir: /mnt/data/docker/core
+
+  tasks:
+    - name: Publish HQ Traefik dynamic configuration
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../../docker/traefik/dynamic/hq.yml.j2"
+        dest: "{{ core_dir }}/traefik/dynamic/hq.yml"
+        owner: root
+        group: root
+        mode: "0644"
+      vars:
+        domain: "{{ hive_secrets.domain }}"
+
+    - name: Wait for HQ backend
+      ansible.builtin.uri:
+        url: http://192.168.0.170:4484/
+        headers:
+          Host: "hq.{{ hive_secrets.domain }}"
+          Origin: "https://hq.{{ hive_secrets.domain }}"
+          Remote-Email: "{{ hq_secrets.hq_allowed_email }}"
+        status_code: 200
+      register: hq_backend
+      retries: 20
+      delay: 3
+      until: hq_backend.status == 200
+      no_log: true
+
+    - name: Verify unauthenticated backend request is rejected
+      ansible.builtin.uri:
+        url: http://192.168.0.170:4484/
+        headers:
+          Host: "hq.{{ hive_secrets.domain }}"
+        status_code: 403
+
+    - name: Verify HQ route is protected by Tinyauth
+      ansible.builtin.uri:
+        url: http://127.0.0.1:80/
+        headers:
+          Host: "hq.{{ hive_secrets.domain }}"
+        follow_redirects: none
+        status_code: [302, 401, 403]

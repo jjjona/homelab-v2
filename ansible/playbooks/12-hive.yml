@@ -303,12 +303,10 @@
     hive_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/hive.sops.yml') | from_yaml }}"
     # Host path of the repo clone == compose project dir == the /app bind mount.
     hive_repo: /opt/hive
-    # Source is the private GitHub repo, cloned over SSH with a write-enabled
-    # deploy key (hive_github_deploy_key in SOPS) — no Forgejo, no token in the
-    # URL. The key is installed for root (host git: this clone + hive-update +
-    # manual pushes) and mounted into the container (in-container agent pushes).
-    # hive-update pulls from this same origin.
-    hive_repo_url: "git@github.com:jjjona/hive.git"
+    # Forgejo is canonical. GitHub receives a one-way push mirror from Forgejo.
+    # The repository-scoped writable key is installed for host deployment Git and
+    # mounted into the container for agent pushes.
+    hive_repo_url: "ssh://git@192.168.0.159:2222/jjjona/hive.git"
     # DECISION: compose runs as root with HOME=/root, so ${HOME} in the repo's
     # docker-compose.yml expands host-side to these:
     hive_home: /root
@@ -325,40 +323,46 @@
       ansible.builtin.command: git config --global --replace-all safe.directory '*'
       changed_when: false
 
-    # --- Install the GitHub deploy key for ROOT (host-side git) -------------
-    # root runs the clone below, the hive-update wrapper (git pull) and any
-    # manual push. A github.com Host entry in root's ssh config points all three
-    # at the deploy key automatically; accept-new pins github's hostkey on first
-    # use, IdentitiesOnly stops ssh offering other keys first.
+    # --- Install the Forgejo deploy key for ROOT (host-side git) ------------
     - name: Ensure root ~/.ssh exists
       ansible.builtin.file:
         path: /root/.ssh
         state: directory
         mode: "0700"
 
-    - name: Install GitHub deploy key for root
+    - name: Install Forgejo deploy key for root
       ansible.builtin.copy:
-        dest: /root/.ssh/hive_github_ed25519
-        # | trim + explicit \n: ansible strips the value's trailing newline when
-        # templating `content`, but OpenSSH keys require a final newline (else
-        # "error in libcrypto"). Normalize to exactly one.
-        content: "{{ hive_secrets.hive_github_deploy_key | trim }}\n"
+        dest: /root/.ssh/hive_forgejo_ed25519
+        content: "{{ hive_secrets.hive_forgejo_deploy_key | trim }}\n"
         mode: "0600"
       no_log: true
 
-    - name: Point root's ssh at the deploy key for github.com
+    - name: Pin Forgejo SSH host keys for root
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../files/forgejo_known_hosts"
+        dest: /root/.ssh/forgejo_known_hosts
+        mode: "0644"
+
+    - name: Point root's SSH at the Forgejo deployment key
       ansible.builtin.blockinfile:
         path: /root/.ssh/config
         create: true
         mode: "0600"
-        marker: "# {mark} ANSIBLE MANAGED — hive github deploy key"
+        marker: "# {mark} ANSIBLE MANAGED — hive forgejo deploy key"
         block: |
-          Host github.com
-              HostName github.com
+          Host 192.168.0.159
+              HostName 192.168.0.159
+              Port 2222
               User git
-              IdentityFile /root/.ssh/hive_github_ed25519
+              IdentityFile /root/.ssh/hive_forgejo_ed25519
               IdentitiesOnly yes
-              StrictHostKeyChecking accept-new
+              UserKnownHostsFile /root/.ssh/forgejo_known_hosts
+              StrictHostKeyChecking yes
+
+    - name: Remove obsolete GitHub deployment key
+      ansible.builtin.file:
+        path: /root/.ssh/hive_github_ed25519
+        state: absent
 
     # --- Clone the hive repo (this IS the /app bind mount; compose runs here) ---
 
@@ -368,8 +372,8 @@
         dest: "{{ hive_repo }}"
         version: main
         update: true
-        # Repointing origin (Forgejo -> GitHub) and discarding any local-only
-        # commit on /opt/hive: hard-reset the working clone to origin/main.
+        # Repoint the existing checkout to canonical Forgejo and discard any
+        # deployment-host-only commit by converging it to origin/main.
         # .env + docker-compose.override.yml are gitignored (untracked), so the
         # reset leaves them in place; they are also re-rendered further below.
         force: true
@@ -483,13 +487,9 @@
         group: "1000"
         recurse: true
 
-    # --- GitHub deploy key for the IN-CONTAINER hive user (uid 1000) ---------
-    # So the agent can `git push` from /app to the private GitHub origin. Seeded
-    # into a dir the override (below) mounts onto /home/hive/.ssh; git inside the
-    # container then resolves github.com via this config with no extra flags.
-    # IdentityFile is the IN-CONTAINER path. Kept separate from /state/ssh (the
-    # node-access key, used via `ssh -F /state/ssh/config`) on purpose.
-    - name: Seed in-container github ssh dir
+    # --- Forgejo deploy key for the IN-CONTAINER hive user (uid 1000) --------
+    # Kept separate from /state/ssh, which is the node-access key.
+    - name: Seed in-container Forgejo SSH directory
       ansible.builtin.file:
         path: "{{ hive_state_dir }}/git-ssh"
         state: directory
@@ -497,28 +497,40 @@
         group: "1000"
         mode: "0700"
 
-    - name: Seed in-container github deploy key
+    - name: Seed in-container Forgejo deploy key
       ansible.builtin.copy:
-        dest: "{{ hive_state_dir }}/git-ssh/id_github"
-        # | trim + explicit \n: ansible strips the value's trailing newline when
-        # templating `content`, but OpenSSH keys require a final newline (else
-        # "error in libcrypto"). Normalize to exactly one.
-        content: "{{ hive_secrets.hive_github_deploy_key | trim }}\n"
+        dest: "{{ hive_state_dir }}/git-ssh/id_forgejo"
+        content: "{{ hive_secrets.hive_forgejo_deploy_key | trim }}\n"
         owner: "1000"
         group: "1000"
         mode: "0600"
       no_log: true
 
-    - name: Seed in-container github ssh config
+    - name: Remove obsolete in-container GitHub key
+      ansible.builtin.file:
+        path: "{{ hive_state_dir }}/git-ssh/id_github"
+        state: absent
+
+    - name: Pin in-container Forgejo SSH host keys
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../files/forgejo_known_hosts"
+        dest: "{{ hive_state_dir }}/git-ssh/known_hosts"
+        owner: "1000"
+        group: "1000"
+        mode: "0644"
+
+    - name: Seed in-container Forgejo SSH config
       ansible.builtin.copy:
         dest: "{{ hive_state_dir }}/git-ssh/config"
         content: |
-          Host github.com
-              HostName github.com
+          Host 192.168.0.159
+              HostName 192.168.0.159
+              Port 2222
               User git
-              IdentityFile /home/hive/.ssh/id_github
+              IdentityFile /home/hive/.ssh/id_forgejo
               IdentitiesOnly yes
-              StrictHostKeyChecking accept-new
+              UserKnownHostsFile /home/hive/.ssh/known_hosts
+              StrictHostKeyChecking yes
         owner: "1000"
         group: "1000"
         mode: "0600"
@@ -571,8 +583,8 @@
                 # entrypoint-level tinyauth on :web — both middlewares apply.)
                 - "traefik.http.middlewares.hive-nocache.headers.customResponseHeaders.Cache-Control=no-store"
                 - "traefik.http.routers.hive.middlewares=hive-nocache"
-              # Mount the github deploy key onto the hive user's ~/.ssh so the
-              # in-container agent can `git push` to the private GitHub origin.
+              # Mount the Forgejo deploy key so the in-container agent can push
+              # to the canonical repository. Forgejo mirrors the result to GitHub.
               # Compose appends this to the base service's volumes list.
               volumes:
                 - {{ hive_state_dir }}/git-ssh:/home/hive/.ssh

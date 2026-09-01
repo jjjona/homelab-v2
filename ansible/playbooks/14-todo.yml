@@ -1,6 +1,6 @@
 ---
 # ============================================================================
-# 14-todo.yml — Deploy the todo app (github.com/jjjona/todo) on Laptop 1
+# 14-todo.yml — Deploy the canonical Forgejo todo app on Laptop 1.
 #
 # A minimal self-hosted Todoist-style app (Bun + SQLite, single container)
 # whose point is completion-anchored recurrence ("X after done"), plus a
@@ -42,7 +42,7 @@
     todo_data_dir: /opt/todo-data  # SQLite + ntfy state; in restic backup paths
     todo_deploy_ssh: /opt/todo-deploy-ssh
     todo_host_user: hive           # uid 1000, matching the container's bun user
-    todo_repo_url: "git@github.com:jjjona/todo.git"
+    todo_repo_url: "ssh://git@192.168.0.159:2222/jjjona/todo.git"
     todo_web_port: 4712            # host port; container listens on 3000
     ntfy_web_port: 4713            # host port; container listens on 80
 
@@ -73,6 +73,15 @@
         group: "1000"
         mode: "0600"
       no_log: true
+      tags: [checkout]
+
+    - name: Pin Forgejo SSH host keys for deployment Git
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../files/forgejo_known_hosts"
+        dest: "{{ todo_deploy_ssh }}/known_hosts"
+        owner: "1000"
+        group: "1000"
+        mode: "0644"
       tags: [checkout]
 
     - name: Make the checkout editable by the container user
@@ -113,6 +122,7 @@
         update: true
         accept_hostkey: true
         key_file: "{{ todo_deploy_ssh }}/id_ed25519"
+        ssh_opts: "-o UserKnownHostsFile={{ todo_deploy_ssh }}/known_hosts -o StrictHostKeyChecking=yes"
       become: true
       become_user: "{{ todo_host_user }}"
       register: todo_git
@@ -223,19 +233,30 @@
       no_log: true
       tags: [git_credentials]
 
-    - name: Configure GitHub SSH in the persistent volume
+    - name: Pin Forgejo SSH host keys in the persistent volume
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../files/forgejo_known_hosts"
+        dest: "{{ todo_ssh_volume.stdout }}/known_hosts"
+        owner: "1000"
+        group: "1000"
+        mode: "0644"
+      tags: [git_credentials]
+
+    - name: Configure Forgejo SSH in the persistent volume
       ansible.builtin.copy:
         dest: "{{ todo_ssh_volume.stdout }}/config"
         owner: "1000"
         group: "1000"
         mode: "0600"
         content: |
-          Host github.com
-              HostName github.com
+          Host 192.168.0.159
+              HostName 192.168.0.159
+              Port 2222
               User git
               IdentityFile /home/bun/.ssh/id_ed25519
               IdentitiesOnly yes
-              StrictHostKeyChecking accept-new
+              UserKnownHostsFile /home/bun/.ssh/known_hosts
+              StrictHostKeyChecking yes
       tags: [git_credentials]
 
     # --- ntfy auth: converge the publisher/subscriber user + topic ACL ---
