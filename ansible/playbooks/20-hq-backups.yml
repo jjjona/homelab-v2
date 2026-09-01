@@ -1,0 +1,130 @@
+---
+# Back up HQ conversation history and disposable workspace state to the existing
+# encrypted Restic/B2 repository. Forgejo remains the source for committed code.
+
+- name: Back up HQ and project workspace state
+  hosts: hq,workspaces
+  gather_facts: false
+  tags: [hq, workspaces, backup]
+
+  vars:
+    backup: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/backups.sops.yml') | from_yaml }}"
+    backup_script: /usr/local/bin/hq-restic-backup
+    backup_log: /var/log/hq-restic-backup.log
+    backup_paths:
+      hq:
+        - /home/hq/.pi/agent
+        - /home/hq/.config/sops
+        - /home/hq/.config/gh
+        - /home/hq/.ssh
+      workspaces:
+        - /srv/workspaces
+    backup_schedule:
+      hq: { hour: "5", minute: "0" }
+      workspaces: { hour: "5", minute: "30" }
+
+  tasks:
+    - name: Install backup tools
+      ansible.builtin.apt:
+        name:
+          - cron
+          - logrotate
+          - restic
+        state: present
+        update_cache: true
+
+    - name: Enable cron
+      ansible.builtin.systemd:
+        name: cron
+        enabled: true
+        state: started
+
+    - name: Create Restic configuration directory
+      ansible.builtin.file:
+        path: /etc/restic
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Install encrypted repository credentials
+      ansible.builtin.copy:
+        dest: /etc/restic/env
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          export B2_ACCOUNT_ID="{{ backup.b2_account_id }}"
+          export B2_ACCOUNT_KEY="{{ backup.b2_account_key }}"
+          export RESTIC_REPOSITORY="b2:{{ backup.b2_bucket }}"
+          export RESTIC_PASSWORD="{{ backup.restic_password }}"
+      no_log: true
+
+    - name: Verify encrypted backup repository access
+      ansible.builtin.shell: . /etc/restic/env && restic snapshots --no-lock --latest 1 >/dev/null
+      args:
+        executable: /bin/sh
+      changed_when: false
+
+    - name: Install HQ state backup script
+      ansible.builtin.copy:
+        dest: "{{ backup_script }}"
+        owner: root
+        group: root
+        mode: "0755"
+        content: |
+          #!/bin/sh
+          set -eu
+          . /etc/restic/env
+          LOG={{ backup_log }}
+          PAUSED=""
+          resume() {
+            for container in $PAUSED; do docker unpause "$container" >/dev/null 2>&1 || true; done
+          }
+          trap resume EXIT
+
+          echo "$(date -Is) backup start" >> "$LOG"
+          {% if inventory_hostname == 'workspaces' %}
+          for container in $(docker ps --format '{{ '{{' }}.Names{{ '}}' }}' | grep '^workspace-' || true); do
+            if docker pause "$container" >/dev/null; then PAUSED="$PAUSED $container"; fi
+          done
+          {% endif %}
+          if restic backup \
+          {% for path in backup_paths[inventory_hostname] %}
+            {{ path }} \
+          {% endfor %}
+            --exclude node_modules \
+            --exclude '*.log' \
+            --exclude '*.sock' \
+            --exclude '*.pid' \
+            >> "$LOG" 2>&1; then
+            echo "$(date -Is) backup ok" >> "$LOG"
+          else
+            code=$?
+            echo "$(date -Is) backup failed ($code)" >> "$LOG"
+            exit "$code"
+          fi
+      no_log: true
+
+    - name: Schedule state backup
+      ansible.builtin.cron:
+        name: HQ and workspace state backup
+        hour: "{{ backup_schedule[inventory_hostname].hour }}"
+        minute: "{{ backup_schedule[inventory_hostname].minute }}"
+        job: "{{ backup_script }}"
+        user: root
+
+    - name: Configure backup log rotation
+      ansible.builtin.copy:
+        dest: /etc/logrotate.d/hq-restic-backup
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          {{ backup_log }} {
+            weekly
+            rotate 8
+            compress
+            missingok
+            notifempty
+          }
