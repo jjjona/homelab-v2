@@ -153,7 +153,6 @@
     controller_age_key_file: >-
       {{ lookup('env', 'SOPS_AGE_KEY_FILE') | default(lookup('env', 'HOME') + '/.config/sops/age/keys.txt', true) }}
     controller_pi_auth_file: "{{ lookup('env', 'HOME') }}/.pi/agent/auth.json"
-    controller_gh_auth_file: "{{ lookup('env', 'HOME') }}/.config/gh/hosts.yml"
 
   pre_tasks:
     - name: Require local credential sources without reading them
@@ -166,7 +165,6 @@
       loop:
         - "{{ controller_age_key_file }}"
         - "{{ controller_pi_auth_file }}"
-        - "{{ controller_gh_auth_file }}"
 
     - name: Stop when a required HQ credential source is absent
       ansible.builtin.assert:
@@ -418,13 +416,13 @@
         mode: "0600"
       no_log: true
 
-    - name: Restore GitHub CLI authentication to HQ
-      ansible.builtin.copy:
-        src: "{{ controller_gh_auth_file }}"
-        dest: "{{ hq_home }}/.config/gh/hosts.yml"
-        owner: hq
-        group: hq
-        mode: "0600"
+    - name: Restore current GitHub CLI authentication to HQ
+      ansible.builtin.command: gh auth login --hostname github.com --git-protocol ssh --with-token
+      args:
+        stdin: "{{ lookup('pipe', 'gh auth token') }}"
+      become: true
+      become_user: hq
+      changed_when: false
       no_log: true
 
     - name: Clone Project Starter from Forgejo

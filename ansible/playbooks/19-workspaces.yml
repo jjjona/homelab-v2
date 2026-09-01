@@ -367,10 +367,12 @@
         content: |
           #!/bin/sh
           set -eu
-          iptables -C DOCKER-USER -s 192.168.0.159 -p tcp --dport 46000:46999 -j ACCEPT 2>/dev/null ||
-            iptables -I DOCKER-USER 1 -s 192.168.0.159 -p tcp --dport 46000:46999 -j ACCEPT
-          iptables -C DOCKER-USER -p tcp --dport 46000:46999 -j DROP 2>/dev/null ||
-            iptables -A DOCKER-USER -p tcp --dport 46000:46999 -j DROP
+          # Docker DNAT changes dport before DOCKER-USER. Match the original
+          # published port through conntrack, not the container's port 4484.
+          iptables -C DOCKER-USER -s 192.168.0.159 -p tcp -m conntrack --ctstate NEW --ctorigdstport 46000:46999 -j ACCEPT 2>/dev/null ||
+            iptables -I DOCKER-USER 1 -s 192.168.0.159 -p tcp -m conntrack --ctstate NEW --ctorigdstport 46000:46999 -j ACCEPT
+          iptables -C DOCKER-USER -p tcp -m conntrack --ctstate NEW --ctorigdstport 46000:46999 -j DROP 2>/dev/null ||
+            iptables -A DOCKER-USER -p tcp -m conntrack --ctstate NEW --ctorigdstport 46000:46999 -j DROP
 
     - name: Configure persistent workspace ingress firewall
       ansible.builtin.copy:
@@ -412,8 +414,8 @@
         set -eu
         docker image inspect hq-workspace:0.1 >/dev/null
         docker inspect workspace-traefik-kop >/dev/null
-        iptables -C DOCKER-USER -s 192.168.0.159 -p tcp --dport 46000:46999 -j ACCEPT
-        iptables -C DOCKER-USER -p tcp --dport 46000:46999 -j DROP
+        iptables -C DOCKER-USER -s 192.168.0.159 -p tcp -m conntrack --ctstate NEW --ctorigdstport 46000:46999 -j ACCEPT
+        iptables -C DOCKER-USER -p tcp -m conntrack --ctstate NEW --ctorigdstport 46000:46999 -j DROP
         test ! -e /srv/workspaces/keys.txt
         test ! -e /srv/workspaces/gh-hosts.yml
       args:
