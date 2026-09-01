@@ -144,6 +144,8 @@ def wait_for_repo(project: dict[str, Any], token: str) -> dict[str, Any]:
 def migrate_repo(project: dict[str, Any], forgejo_token: str, gh_token: str) -> dict[str, Any]:
     existing = get_repo(project, forgejo_token)
     source = project["github"]
+    if existing is None and project.get("source") == "forgejo":
+        raise ProjectError(f"canonical Forgejo repository is absent for {project['slug']}")
     if existing is None:
         print(f"{project['slug']}: importing GitHub history and metadata")
         api(
@@ -202,6 +204,28 @@ def gh_json(path: str, method: str = "GET", fields: dict[str, Any] | None = None
         input_text = json.dumps(fields)
     output = run(argv, input_text=input_text)
     return json.loads(output) if output.strip() else None
+
+
+def ensure_github_repository(project: dict[str, Any]) -> None:
+    source = project["github"]
+    check = subprocess.run(
+        ["gh", "repo", "view", f"{source['owner']}/{source['name']}"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if check.returncode == 0:
+        return
+    print(f"{project['slug']}: creating empty GitHub mirror repository")
+    gh_json(
+        "user/repos",
+        "POST",
+        {
+            "name": source["name"],
+            "description": source["description"],
+            "private": source["private"],
+        },
+    )
 
 
 def ensure_github_key(project: dict[str, Any], public_key: str) -> None:
@@ -313,6 +337,7 @@ def new_project(name: str, description: str, private: bool, token: str) -> dict[
     project = {
         "slug": name,
         "forgejo_owner": "jjjona",
+        "source": "forgejo",
         "class": "workspace",
         "deployment": "none",
         "github": {
@@ -352,19 +377,7 @@ def new_project(name: str, description: str, private: bool, token: str) -> dict[
             },
             expected=(201,),
         )
-    check = subprocess.run(
-        ["gh", "repo", "view", f"jjjona/{name}"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
-    if check.returncode:
-        print(f"{name}: creating empty GitHub mirror repository")
-        gh_json(
-            "user/repos",
-            "POST",
-            {"name": name, "description": description, "private": private},
-        )
+    ensure_github_repository(project)
     ensure_push_mirror(project, token)
     last_error: Exception | None = None
     for _ in range(30):
@@ -426,6 +439,7 @@ def main() -> int:
             verify(project, token)
         else:
             migrate_repo(project, token, gh_token)
+            ensure_github_repository(project)
             ensure_push_mirror(project, token)
             # Mirror execution is asynchronous; give the first sync a bounded window.
             last_error: Exception | None = None

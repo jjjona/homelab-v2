@@ -76,6 +76,29 @@
       }
     },
     {
+      "slug": "book-knowledge",
+      "forgejo_owner": "jade",
+      "source": "forgejo",
+      "class": "workspace",
+      "deployment": "none",
+      "github": {
+        "owner": "jjjona",
+        "name": "book-knowledge",
+        "url": "https://github.com/jjjona/book-knowledge",
+        "private": true,
+        "archived": false,
+        "default_branch": "main",
+        "description": "Book chapters and summaries for triage and reference",
+        "fork": false,
+        "template": false,
+        "issues": true,
+        "wiki": true,
+        "projects": true,
+        "disk_kib": 0,
+        "updated_at": ""
+      }
+    },
+    {
       "slug": "bunbase",
       "forgejo_owner": "jjjona",
       "class": "workspace",
@@ -95,6 +118,29 @@
         "projects": true,
         "disk_kib": 113,
         "updated_at": "2026-01-24T20:53:03Z"
+      }
+    },
+    {
+      "slug": "cartographer",
+      "forgejo_owner": "jade",
+      "source": "forgejo",
+      "class": "deployed",
+      "deployment": "existing",
+      "github": {
+        "owner": "jjjona",
+        "name": "cartographer",
+        "url": "https://github.com/jjjona/cartographer",
+        "private": true,
+        "archived": false,
+        "default_branch": "main",
+        "description": "Conceptual topology mapper \u2014 maps fault lines in human thought across corpora",
+        "fork": false,
+        "template": false,
+        "issues": true,
+        "wiki": true,
+        "projects": true,
+        "disk_kib": 0,
+        "updated_at": ""
       }
     },
     {
@@ -252,6 +298,29 @@
       }
     },
     {
+      "slug": "jade-liquidator",
+      "forgejo_owner": "jade",
+      "source": "forgejo",
+      "class": "deployed",
+      "deployment": "existing",
+      "github": {
+        "owner": "jjjona",
+        "name": "jade-liquidator",
+        "url": "https://github.com/jjjona/jade-liquidator",
+        "private": true,
+        "archived": false,
+        "default_branch": "main",
+        "description": "Autonomous Aave V3 liquidation bot on Mantle (chain 5000)",
+        "fork": false,
+        "template": false,
+        "issues": true,
+        "wiki": true,
+        "projects": true,
+        "disk_kib": 0,
+        "updated_at": ""
+      }
+    },
+    {
       "slug": "jade-memory",
       "forgejo_owner": "jade",
       "class": "deployed",
@@ -271,6 +340,52 @@
         "projects": true,
         "disk_kib": 70,
         "updated_at": "2026-02-18T08:18:35Z"
+      }
+    },
+    {
+      "slug": "jade-soul",
+      "forgejo_owner": "jade",
+      "source": "forgejo",
+      "class": "workspace",
+      "deployment": "none",
+      "github": {
+        "owner": "jjjona",
+        "name": "jade-soul",
+        "url": "https://github.com/jjjona/jade-soul",
+        "private": true,
+        "archived": false,
+        "default_branch": "main",
+        "description": "",
+        "fork": false,
+        "template": false,
+        "issues": true,
+        "wiki": true,
+        "projects": true,
+        "disk_kib": 0,
+        "updated_at": ""
+      }
+    },
+    {
+      "slug": "jade-transcribe",
+      "forgejo_owner": "jade",
+      "source": "forgejo",
+      "class": "deployed",
+      "deployment": "existing",
+      "github": {
+        "owner": "jjjona",
+        "name": "jade-transcribe",
+        "url": "https://github.com/jjjona/jade-transcribe",
+        "private": true,
+        "archived": false,
+        "default_branch": "main",
+        "description": "Transcription web app",
+        "fork": false,
+        "template": false,
+        "issues": true,
+        "wiki": true,
+        "projects": true,
+        "disk_kib": 0,
+        "updated_at": ""
       }
     },
     {
@@ -628,49 +743,6 @@
     }
   ],
   "forgejo_existing_projects": [
-    {
-      "owner": "jade",
-      "slug": "book-knowledge",
-      "class": "workspace",
-      "deployment": "none",
-      "managed_by_hq": true
-    },
-    {
-      "owner": "jade",
-      "slug": "cartographer",
-      "class": "deployed",
-      "deployment": "existing",
-      "managed_by_hq": true
-    },
-    {
-      "owner": "jade",
-      "slug": "jade-liquidator",
-      "class": "deployed",
-      "deployment": "existing",
-      "managed_by_hq": true
-    },
-    {
-      "owner": "jade",
-      "slug": "jade-memory",
-      "class": "deployed",
-      "deployment": "existing",
-      "managed_by_hq": true,
-      "github_mirror": "jjjona/jade-memory"
-    },
-    {
-      "owner": "jade",
-      "slug": "jade-soul",
-      "class": "workspace",
-      "deployment": "none",
-      "managed_by_hq": true
-    },
-    {
-      "owner": "jade",
-      "slug": "jade-transcribe",
-      "class": "deployed",
-      "deployment": "existing",
-      "managed_by_hq": true
-    },
     {
       "owner": "niels",
       "slug": "katana-mirror",
