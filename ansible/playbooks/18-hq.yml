@@ -8,6 +8,7 @@
   hosts: localhost
   connection: local
   gather_facts: false
+  become: false
   tags: [hq, forgejo]
 
   vars:
@@ -22,6 +23,7 @@
           Authorization: "token {{ hq_secrets.forgejo_api_token }}"
         return_content: true
       register: forgejo_keys
+      check_mode: false
       no_log: true
 
     - name: Register the HQ management SSH key
@@ -37,6 +39,7 @@
           read_only: false
         status_code: 201
       when: >-
+        not ansible_check_mode and
         (forgejo_keys.json | selectattr('title', 'equalto', 'hq-management') | list | length) == 0
       no_log: true
 
@@ -98,6 +101,7 @@
         pct create {{ ct_id }} local:vztmpl/{{ ct_template }}
         --hostname {{ ct_hostname }}
         --unprivileged 1
+        --features nesting=1,keyctl=1
         --rootfs local-lvm:{{ ct_rootfs_size }}
         --memory {{ ct_memory }}
         --swap {{ ct_swap }}
@@ -113,6 +117,10 @@
       ansible.builtin.file:
         path: /tmp/hq-controller.pub
         state: absent
+
+    - name: Ensure HQ LXC has systemd-compatible nesting features
+      ansible.builtin.command: pct set {{ ct_id }} --features nesting=1,keyctl=1
+      changed_when: false
 
     - name: Ensure HQ LXC is running
       ansible.builtin.command: pct start {{ ct_id }}
@@ -154,6 +162,7 @@
       delegate_to: localhost
       become: false
       register: credential_sources
+      no_log: true
       loop:
         - "{{ controller_age_key_file }}"
         - "{{ controller_pi_auth_file }}"
@@ -166,6 +175,7 @@
       loop: "{{ credential_sources.results }}"
       loop_control:
         label: "{{ item.item }}"
+      no_log: true
 
   tasks:
     - name: Install HQ system and build packages
@@ -178,12 +188,14 @@
           - ca-certificates
           - curl
           - git
+          - gh
           - libevent-dev
           - libncurses-dev
           - nftables
           - pkg-config
           - python3
           - python3-pip
+          - sudo
           - unzip
           - xz-utils
         state: present
@@ -305,6 +317,7 @@
         mode: "{{ item.mode }}"
       loop:
         - { path: /opt/hq, mode: "0755" }
+        - { path: "{{ homelab_repo }}", mode: "0755" }
         - { path: "{{ hq_home }}/.ssh", mode: "0700" }
         - { path: "{{ hq_home }}/.config/sops/age", mode: "0700" }
         - { path: "{{ hq_home }}/.config/gh", mode: "0700" }
@@ -376,6 +389,12 @@
               StrictHostKeyChecking accept-new
           Host hive
               HostName 192.168.0.167
+              User root
+              IdentityFile ~/.ssh/id_ed25519
+              IdentitiesOnly yes
+              StrictHostKeyChecking accept-new
+          Host workspaces
+              HostName 192.168.0.172
               User root
               IdentityFile ~/.ssh/id_ed25519
               IdentitiesOnly yes
@@ -580,6 +599,7 @@
         test "$(tmux -V)" = "tmux 3.5a"
         sops --version >/dev/null
         ansible-playbook --version >/dev/null
+        gh auth status >/dev/null 2>&1
       args:
         executable: /bin/bash
       changed_when: false

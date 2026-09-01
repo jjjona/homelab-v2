@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -62,6 +63,10 @@ def github_token() -> str:
 
 def inventory() -> dict[str, Any]:
     return json.loads(INVENTORY.read_text())
+
+
+def save_inventory(data: dict[str, Any]) -> None:
+    INVENTORY.write_text(json.dumps(data, indent=2) + "\n")
 
 
 def selected_projects(name: str | None, all_projects: bool) -> list[dict[str, Any]]:
@@ -296,6 +301,89 @@ def archive_if_required(project: dict[str, Any], token: str) -> None:
         api("PATCH", repo_path(project), token, {"archived": True})
 
 
+def new_project(name: str, description: str, private: bool, token: str) -> dict[str, Any]:
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,62}", name):
+        raise ProjectError("project names must be 2-63 lowercase letters, digits, or hyphens")
+    data = inventory()
+    existing = next((item for item in data["projects"] if item["slug"] == name), None)
+    if existing:
+        print(f"{name}: already registered")
+        return existing
+
+    project = {
+        "slug": name,
+        "forgejo_owner": "jjjona",
+        "class": "workspace",
+        "deployment": "none",
+        "github": {
+            "owner": "jjjona",
+            "name": name,
+            "url": f"https://github.com/jjjona/{name}",
+            "private": private,
+            "archived": False,
+            "default_branch": "main",
+            "description": description,
+            "fork": False,
+            "template": False,
+            "issues": True,
+            "wiki": True,
+            "projects": True,
+            "disk_kib": 0,
+            "updated_at": "",
+        },
+    }
+    if get_repo(project, token) is None:
+        print(f"{name}: generating Forgejo repository from project-starter")
+        api(
+            "POST",
+            "/repos/jjjona/project-starter/generate",
+            token,
+            {
+                "default_branch": "main",
+                "description": description,
+                "git_content": True,
+                "labels": True,
+                "name": name,
+                "owner": "jjjona",
+                "private": private,
+                "protected_branch": False,
+                "topics": True,
+                "webhooks": False,
+            },
+            expected=(201,),
+        )
+    check = subprocess.run(
+        ["gh", "repo", "view", f"jjjona/{name}"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if check.returncode:
+        print(f"{name}: creating empty GitHub mirror repository")
+        gh_json(
+            "user/repos",
+            "POST",
+            {"name": name, "description": description, "private": private},
+        )
+    ensure_push_mirror(project, token)
+    last_error: Exception | None = None
+    for _ in range(30):
+        try:
+            verify(project, token)
+            last_error = None
+            break
+        except ProjectError as error:
+            last_error = error
+            time.sleep(2)
+    if last_error:
+        raise last_error
+    data["projects"].append(project)
+    data["projects"].sort(key=lambda item: item["slug"].lower())
+    save_inventory(data)
+    print(f"{name}: registered; commit {INVENTORY.relative_to(ROOT)} after review")
+    return project
+
+
 def status(project: dict[str, Any], token: str) -> None:
     repo = get_repo(project, token)
     if repo is None:
@@ -310,17 +398,25 @@ def status(project: dict[str, Any], token: str) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("status", "migrate", "verify"))
+    parser.add_argument("command", choices=("status", "migrate", "verify", "new"))
     parser.add_argument("name", nargs="?")
     parser.add_argument("--all", action="store_true")
+    parser.add_argument("--description", default="")
+    parser.add_argument("--public", action="store_true")
     args = parser.parse_args()
-    projects = selected_projects(args.name, args.all)
+    projects = [] if args.command == "new" else selected_projects(args.name, args.all)
     secrets = load_secrets()
     token = secrets["forgejo_token"]
     # Fail before touching repositories if the stored token or target is wrong.
     user = api("GET", "/user", token)
     if not user.get("is_admin"):
         raise ProjectError("the HQ Forgejo token is not an administrator token")
+
+    if args.command == "new":
+        if not args.name:
+            raise ProjectError("new requires a project name")
+        new_project(args.name, args.description, not args.public, token)
+        return 0
 
     gh_token = github_token() if args.command == "migrate" else ""
     for project in projects:

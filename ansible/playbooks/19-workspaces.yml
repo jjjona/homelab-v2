@@ -1,0 +1,421 @@
+---
+# Isolated project-code plane. Project Pi sessions run here without the Age key,
+# Ansible inventory, host-management SSH key, GitHub admin token, or Docker socket.
+
+- name: Register repository-scoped workspace build keys
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags: [workspaces, forgejo]
+
+  vars:
+    hq_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/hq.sops.yml') | from_yaml }}"
+    forgejo_api: http://192.168.0.159:3001/api/v1
+    build_keys:
+      - repo: project-starter
+        title: workspace-image-project-starter
+        key: "{{ hq_secrets.workspace_starter_public_key }}"
+      - repo: pi-working-discipline
+        title: workspace-image-pi-discipline
+        key: "{{ hq_secrets.workspace_discipline_public_key }}"
+
+  tasks:
+    - name: List Forgejo repository keys
+      ansible.builtin.uri:
+        url: "{{ forgejo_api }}/repos/jjjona/{{ item.repo }}/keys"
+        headers:
+          Authorization: "token {{ hq_secrets.forgejo_api_token }}"
+        return_content: true
+      loop: "{{ build_keys }}"
+      register: current_build_keys
+      check_mode: false
+      no_log: true
+
+    - name: Register missing read-only workspace build keys
+      ansible.builtin.uri:
+        url: "{{ forgejo_api }}/repos/jjjona/{{ item.item.repo }}/keys"
+        method: POST
+        headers:
+          Authorization: "token {{ hq_secrets.forgejo_api_token }}"
+        body_format: json
+        body:
+          title: "{{ item.item.title }}"
+          key: "{{ item.item.key }}"
+          read_only: true
+        status_code: 201
+      loop: "{{ current_build_keys.results }}"
+      when: >-
+        not ansible_check_mode and
+        (item.json | selectattr('title', 'equalto', item.item.title) | list | length) == 0
+      no_log: true
+
+- name: Create project workspace LXC
+  hosts: proxmox
+  gather_facts: false
+  tags: [workspaces, create]
+
+  vars:
+    ct_id: 207
+    ct_hostname: workspaces
+    ct_ip: 192.168.0.172
+    ct_gateway: 192.168.0.1
+    ct_memory: 4096
+    ct_swap: 2048
+    ct_cores: 4
+    ct_rootfs_size: 40
+    ct_template: debian-12-standard_12.12-1_amd64.tar.zst
+    controller_ssh_pubkey: "{{ lookup('file', lookup('env', 'HOME') + '/.ssh/id_ed25519.pub') }}"
+
+  tasks:
+    - name: Check whether workspace LXC exists
+      ansible.builtin.command: pct status {{ ct_id }}
+      register: workspace_ct
+      failed_when: false
+      changed_when: false
+
+    - name: Check whether proposed workspace address answers
+      ansible.builtin.command: ping -c 1 -W 1 {{ ct_ip }}
+      register: workspace_ip
+      failed_when: false
+      changed_when: false
+      when: workspace_ct.rc != 0
+
+    - name: Require an unused workspace address
+      ansible.builtin.assert:
+        that: workspace_ip.rc != 0
+        fail_msg: "{{ ct_ip }} answered while LXC {{ ct_id }} is absent."
+      when: workspace_ct.rc != 0
+
+    - name: Ensure Debian container template is available
+      ansible.builtin.command: pveam download local {{ ct_template }}
+      register: workspace_template
+      changed_when: "'already exists' not in workspace_template.stdout"
+      failed_when:
+        - workspace_template.rc != 0
+        - "'already exists' not in workspace_template.stderr"
+      when: workspace_ct.rc != 0
+
+    - name: Stage controller SSH public key
+      ansible.builtin.copy:
+        dest: /tmp/workspaces-controller.pub
+        content: "{{ controller_ssh_pubkey | trim }}\n"
+        mode: "0600"
+      when: workspace_ct.rc != 0
+
+    - name: Create unprivileged Docker-capable workspace LXC
+      ansible.builtin.command: >-
+        pct create {{ ct_id }} local:vztmpl/{{ ct_template }}
+        --hostname {{ ct_hostname }}
+        --unprivileged 1
+        --features nesting=1,keyctl=1
+        --rootfs local-lvm:{{ ct_rootfs_size }}
+        --memory {{ ct_memory }}
+        --swap {{ ct_swap }}
+        --cores {{ ct_cores }}
+        --net0 name=eth0,bridge=vmbr0,ip={{ ct_ip }}/24,gw={{ ct_gateway }},firewall=0
+        --nameserver 1.1.1.1
+        --onboot 1
+        --start 1
+        --ssh-public-keys /tmp/workspaces-controller.pub
+      when: workspace_ct.rc != 0
+
+    - name: Remove staged controller key
+      ansible.builtin.file:
+        path: /tmp/workspaces-controller.pub
+        state: absent
+
+    - name: Keep required LXC nesting features converged
+      ansible.builtin.command: pct set {{ ct_id }} --features nesting=1,keyctl=1
+      changed_when: false
+
+    - name: Ensure workspace LXC is running
+      ansible.builtin.command: pct start {{ ct_id }}
+      register: workspace_start
+      failed_when:
+        - workspace_start.rc != 0
+        - "'already running' not in workspace_start.stderr"
+      changed_when: workspace_start.rc == 0
+
+    - name: Wait for workspace systemd
+      ansible.builtin.command: pct exec {{ ct_id }} -- systemctl is-system-running --wait
+      register: workspace_systemd
+      retries: 18
+      delay: 5
+      until: workspace_systemd.rc == 0 or 'running' in workspace_systemd.stdout
+      changed_when: false
+
+- name: Provision isolated project workspaces
+  hosts: workspaces
+  gather_facts: true
+  tags: [workspaces, provision]
+
+  vars:
+    hq_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/hq.sops.yml') | from_yaml }}"
+    image_dir: /opt/workspace-image
+    controller_pi_auth_file: "{{ lookup('env', 'HOME') }}/.pi/agent/auth.json"
+
+  tasks:
+    - name: Require local Pi authentication seed
+      ansible.builtin.stat:
+        path: "{{ controller_pi_auth_file }}"
+      delegate_to: localhost
+      become: false
+      register: pi_auth_source
+      no_log: true
+
+    - name: Stop when Pi authentication seed is absent
+      ansible.builtin.assert:
+        that: pi_auth_source.stat.isreg | default(false)
+        fail_msg: "The controller Pi auth store is required to seed isolated workspaces."
+      no_log: true
+
+    - name: Install Docker prerequisites
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - git
+          - gnupg
+          - iptables
+          - python3
+        state: present
+        update_cache: true
+
+    - name: Create Docker apt keyring directory
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Install Docker apt signing key
+      ansible.builtin.get_url:
+        url: https://download.docker.com/linux/debian/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        mode: "0644"
+
+    - name: Configure Docker apt repository
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/docker.list
+        mode: "0644"
+        content: >-
+          deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc]
+          https://download.docker.com/linux/debian
+          {{ ansible_facts['distribution_release'] }} stable
+
+    - name: Install Docker Engine
+      ansible.builtin.apt:
+        name:
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-ce
+          - docker-ce-cli
+          - docker-compose-plugin
+        state: present
+        update_cache: true
+
+    - name: Configure Docker log rotation
+      ansible.builtin.copy:
+        dest: /etc/docker/daemon.json
+        mode: "0644"
+        content: |
+          {
+            "storage-driver": "overlay2",
+            "log-driver": "json-file",
+            "log-opts": {"max-size": "10m", "max-file": "3"}
+          }
+      register: workspace_docker_config
+
+    - name: Enable Docker
+      ansible.builtin.systemd:
+        name: docker
+        enabled: true
+        state: "{{ 'restarted' if workspace_docker_config.changed else 'started' }}"
+
+    - name: Create workspace service account
+      ansible.builtin.user:
+        name: workspace
+        uid: "1000"
+        shell: /bin/bash
+        create_home: true
+        state: present
+
+    - name: Create workspace directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - "{{ image_dir }}"
+        - /srv/workspaces
+
+    - name: Pin Forgejo host keys for workspace clones
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../files/forgejo_known_hosts"
+        dest: /srv/workspaces/forgejo_known_hosts
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Install per-workspace Pi authentication seed
+      ansible.builtin.copy:
+        src: "{{ controller_pi_auth_file }}"
+        dest: /srv/workspaces/pi-auth-seed.json
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+
+    - name: Install Project Starter build key
+      ansible.builtin.copy:
+        dest: /root/.ssh/workspace-project-starter
+        content: "{{ hq_secrets.workspace_starter_private_key | trim }}\n"
+        mode: "0600"
+      no_log: true
+
+    - name: Install Pi discipline build key
+      ansible.builtin.copy:
+        dest: /root/.ssh/workspace-pi-discipline
+        content: "{{ hq_secrets.workspace_discipline_private_key | trim }}\n"
+        mode: "0600"
+      no_log: true
+
+    - name: Clone Project Starter build context
+      ansible.builtin.git:
+        repo: ssh://git@192.168.0.159:2222/jjjona/project-starter.git
+        dest: "{{ image_dir }}/project-starter"
+        version: main
+        key_file: /root/.ssh/workspace-project-starter
+        ssh_opts: "-o UserKnownHostsFile=/srv/workspaces/forgejo_known_hosts -o StrictHostKeyChecking=yes"
+      register: workspace_starter_source
+
+    - name: Clone Pi discipline build context
+      ansible.builtin.git:
+        repo: ssh://git@192.168.0.159:2222/jjjona/pi-working-discipline.git
+        dest: "{{ image_dir }}/pi-working-discipline"
+        version: main
+        key_file: /root/.ssh/workspace-pi-discipline
+        ssh_opts: "-o UserKnownHostsFile=/srv/workspaces/forgejo_known_hosts -o StrictHostKeyChecking=yes"
+      register: workspace_discipline_source
+
+    - name: Install workspace image definition
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../hq/workspace/{{ item }}"
+        dest: "{{ image_dir }}/{{ item }}"
+        owner: root
+        group: root
+        mode: "{{ '0755' if item == 'start-workspace.sh' else '0644' }}"
+      loop:
+        - Dockerfile
+        - start-workspace.sh
+      register: workspace_image_definition
+
+    - name: Build isolated workspace image
+      ansible.builtin.command: docker build -t hq-workspace:0.1 .
+      args:
+        chdir: "{{ image_dir }}"
+      when: >-
+        workspace_image_definition.changed or
+        workspace_starter_source.changed or
+        workspace_discipline_source.changed
+      changed_when: true
+
+    - name: Check workspace image exists
+      ansible.builtin.command: docker image inspect hq-workspace:0.1
+      register: workspace_image
+      changed_when: false
+      failed_when: false
+
+    - name: Build missing workspace image
+      ansible.builtin.command: docker build -t hq-workspace:0.1 .
+      args:
+        chdir: "{{ image_dir }}"
+      when: workspace_image.rc != 0
+      changed_when: true
+
+    - name: Install traefik-kop stack
+      ansible.builtin.copy:
+        dest: /opt/workspace-kop.yml
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          services:
+            traefik-kop:
+              image: ghcr.io/jittering/traefik-kop:latest
+              container_name: workspace-traefik-kop
+              restart: unless-stopped
+              volumes:
+                - /var/run/docker.sock:/var/run/docker.sock:ro
+              environment:
+                - REDIS_ADDR=192.168.0.159:6379
+                - BIND_IP=192.168.0.172
+                - POLL_INTERVAL=5
+
+    - name: Start workspace traefik-kop
+      ansible.builtin.command: docker compose -f /opt/workspace-kop.yml up -d
+      changed_when: false
+
+    - name: Install Docker workspace ingress firewall
+      ansible.builtin.copy:
+        dest: /usr/local/sbin/workspace-firewall
+        owner: root
+        group: root
+        mode: "0755"
+        content: |
+          #!/bin/sh
+          set -eu
+          iptables -C DOCKER-USER -s 192.168.0.159 -p tcp --dport 46000:46999 -j ACCEPT 2>/dev/null ||
+            iptables -I DOCKER-USER 1 -s 192.168.0.159 -p tcp --dport 46000:46999 -j ACCEPT
+          iptables -C DOCKER-USER -p tcp --dport 46000:46999 -j DROP 2>/dev/null ||
+            iptables -A DOCKER-USER -p tcp --dport 46000:46999 -j DROP
+
+    - name: Configure persistent workspace ingress firewall
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/workspace-firewall.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Restrict project workspace ports to Traefik
+          After=docker.service
+          Requires=docker.service
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/sbin/workspace-firewall
+          RemainAfterExit=yes
+
+          [Install]
+          WantedBy=multi-user.target
+      register: workspace_firewall_unit
+
+    - name: Enable workspace ingress firewall
+      ansible.builtin.systemd:
+        name: workspace-firewall
+        enabled: true
+        state: restarted
+        daemon_reload: "{{ workspace_firewall_unit.changed }}"
+
+    - name: Authorize source-pinned HQ management key
+      ansible.posix.authorized_key:
+        user: root
+        key: "{{ hq_secrets.hq_ssh_public_key }}"
+        key_options: 'from="192.168.0.170"'
+        state: present
+
+    - name: Verify workspace isolation baseline
+      ansible.builtin.shell: |
+        set -eu
+        docker image inspect hq-workspace:0.1 >/dev/null
+        docker inspect workspace-traefik-kop >/dev/null
+        iptables -C DOCKER-USER -s 192.168.0.159 -p tcp --dport 46000:46999 -j ACCEPT
+        iptables -C DOCKER-USER -p tcp --dport 46000:46999 -j DROP
+        test ! -e /srv/workspaces/keys.txt
+        test ! -e /srv/workspaces/gh-hosts.yml
+      args:
+        executable: /bin/bash
+      changed_when: false

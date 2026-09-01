@@ -626,17 +626,56 @@
       }
     }
   ],
-  "forgejo_existing_namespaces": {
-    "jade": [
-      "book-knowledge",
-      "cartographer",
-      "jade-liquidator",
-      "jade-memory",
-      "jade-soul",
-      "jade-transcribe"
-    ],
-    "niels": [
-      "katana-mirror"
-    ]
-  }
+  "forgejo_existing_projects": [
+    {
+      "owner": "jade",
+      "slug": "book-knowledge",
+      "class": "workspace",
+      "deployment": "none",
+      "managed_by_hq": true
+    },
+    {
+      "owner": "jade",
+      "slug": "cartographer",
+      "class": "deployed",
+      "deployment": "existing",
+      "managed_by_hq": true
+    },
+    {
+      "owner": "jade",
+      "slug": "jade-liquidator",
+      "class": "deployed",
+      "deployment": "existing",
+      "managed_by_hq": true
+    },
+    {
+      "owner": "jade",
+      "slug": "jade-memory",
+      "class": "deployed",
+      "deployment": "existing",
+      "managed_by_hq": true,
+      "github_mirror": "jjjona/jade-memory"
+    },
+    {
+      "owner": "jade",
+      "slug": "jade-soul",
+      "class": "workspace",
+      "deployment": "none",
+      "managed_by_hq": true
+    },
+    {
+      "owner": "jade",
+      "slug": "jade-transcribe",
+      "class": "deployed",
+      "deployment": "existing",
+      "managed_by_hq": true
+    },
+    {
+      "owner": "niels",
+      "slug": "katana-mirror",
+      "class": "external",
+      "deployment": "none",
+      "managed_by_hq": false
+    }
+  ]
 }
