@@ -597,10 +597,16 @@
         test "$(tmux -V)" = "tmux 3.5a"
         sops --version >/dev/null
         ansible-playbook --version >/dev/null
-        gh auth status >/dev/null 2>&1
       args:
         executable: /bin/bash
       changed_when: false
+
+    - name: Verify HQ GitHub authentication
+      ansible.builtin.command: gh auth status
+      become: true
+      become_user: hq
+      changed_when: false
+      no_log: true
 
 - name: Authorize HQ on managed hosts
   hosts: proxmox,docker_host,laptop1,laptop2,hive
