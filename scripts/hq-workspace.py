@@ -168,9 +168,9 @@ def ensure_checkout(owner: str, slug: str) -> None:
     )
 
 
-def deploy(slug: str, owner: str, port: int, identity: str) -> None:
+def deploy(slug: str, owner: str, port: int, identity: str, hostname: str) -> None:
     root = f"/srv/workspaces/{slug}"
-    origin = f"https://{slug}-code.jnrm.eu"
+    origin = f"https://{hostname}"
     compose = f"""services:
   workspace:
     image: hq-workspace:0.1
@@ -202,7 +202,7 @@ def deploy(slug: str, owner: str, port: int, identity: str) -> None:
     route = f"""http:
   routers:
     workspace-{slug}:
-      rule: "Host(`{slug}-code.jnrm.eu`)"
+      rule: "Host(`{hostname}`)"
       entryPoints: [web]
       service: workspace-{slug}
       middlewares: [workspace-{slug}-nocache]
@@ -232,7 +232,7 @@ def deploy(slug: str, owner: str, port: int, identity: str) -> None:
             "curl",
             "-fsS",
             "-H",
-            f"Host: {slug}-code.jnrm.eu",
+            f"Host: {hostname}",
             "-H",
             f"Origin: {origin}",
             "-H",
@@ -264,11 +264,14 @@ def create(slug: str) -> None:
     values = secrets()
     owner = project.get("forgejo_owner", project.get("owner"))
     port = allocate_port(data, project, persistent)
+    hostname = project.get("workspace_host", f"{slug}-code.jnrm.eu")
+    if not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", hostname):
+        raise WorkspaceError("invalid workspace hostname")
     ensure_workspace_key(owner, slug, values["token"])
     ensure_checkout(owner, slug)
-    deploy(slug, owner, port, values["identity"])
+    deploy(slug, owner, port, values["identity"], hostname)
     print(f"Project:   https://git.jnrm.eu/{owner}/{slug}")
-    print(f"Workspace: https://{slug}-code.jnrm.eu")
+    print(f"Workspace: https://{hostname}")
     print("Application: not deployed; define its runtime with HQ after the first useful build")
 
 

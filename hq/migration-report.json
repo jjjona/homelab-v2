@@ -28,7 +28,7 @@
     "address": "192.168.0.172",
     "published_port_range": "46000-46999",
     "backend_direct_access": "traefik-only",
-    "pilot": "https://project-starter-code.jnrm.eu"
+    "pilot": "https://starter.jnrm.eu"
   },
   "recovery_verification": {
     "post_migration_forgejo_backup": "ok",

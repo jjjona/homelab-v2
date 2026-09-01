@@ -607,7 +607,8 @@
         "disk_kib": 22,
         "updated_at": "2026-08-26T07:10:36Z"
       },
-      "workspace_port": 46000
+      "workspace_port": 46000,
+      "workspace_host": "starter.jnrm.eu"
     },
     {
       "slug": "prompts",
