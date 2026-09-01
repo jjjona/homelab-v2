@@ -456,54 +456,6 @@
       become: true
       become_user: hq
 
-    - name: Install controller homelab operating instructions
-      ansible.builtin.copy:
-        src: "{{ playbook_dir }}/../../AGENTS.md"
-        dest: "{{ homelab_repo }}/AGENTS.md"
-        owner: hq
-        group: hq
-        mode: "0644"
-
-    - name: Install HQ-local operating context
-      ansible.builtin.copy:
-        dest: "{{ homelab_repo }}/AGENTS.override.md"
-        owner: hq
-        group: hq
-        mode: "0644"
-        content: |
-          {{ lookup('file', playbook_dir + '/../../AGENTS.md') }}
-
-          # HQ management environment
-
-          This checkout runs inside the dedicated HQ management LXC. Forgejo is
-          canonical and GitHub is a one-way mirror. Never execute project code in
-          this management LXC or copy its Age and host-management SSH identities
-          into a project workspace.
-
-          Current project inventory: `hq/projects.json`.
-
-          Create a private project from the Project Starter template, create its
-          GitHub mirror, and register it:
-
-          ```sh
-          hq-project new <slug> --description "<purpose>"
-          ```
-
-          Create or resume an isolated Pi workspace for any registered project:
-
-          ```sh
-          hq-workspace create <slug>
-          ```
-
-          The workspace command prints the Forgejo and `<slug>-code.jnrm.eu`
-          locations. It intentionally does not invent an application deployment.
-          After the first useful build defines the runtime and state, add the
-          smallest reproducible staging/production manifest to this repository.
-
-          Inventory edits remain ordinary Git changes: review, validate, commit,
-          and push them to Forgejo. Never push directly to the GitHub mirror.
-      register: hq_operating_context
-
     - name: Clone Pi working discipline from Forgejo
       ansible.builtin.git:
         repo: "{{ forgejo_base }}/pi-working-discipline.git"
@@ -613,18 +565,6 @@
         name: hq
         enabled: true
         state: started
-
-    - name: Reload the HQ shell when its managed baseline changes
-      ansible.builtin.shell: |
-        set -eu
-        id=$(bun run {{ project_starter }}/src/project-id.ts {{ homelab_repo }})
-        tmux -L "project-$id" -f {{ project_starter }}/config/tmux.conf \
-          respawn-pane -k -t "project-$id" -c {{ homelab_repo }} "exec bash"
-      args:
-        executable: /bin/bash
-      become: true
-      become_user: hq
-      when: hq_operating_context.changed or hq_pi_install.changed
 
     - name: Install HQ nftables policy
       ansible.builtin.copy:
