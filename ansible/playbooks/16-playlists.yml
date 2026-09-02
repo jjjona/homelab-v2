@@ -135,6 +135,7 @@
           - "Playlists is healthy on laptop1:{{ playlists_web_port }}"
           - "Seeded playlists: {{ playlists_library.json.playlists | length }}"
           - "Checkout revision: {{ playlists_git.after }}"
+      when: not ansible_check_mode
 
 - name: Publish playlist routes through Cloudflare and Traefik
   hosts: docker_host
