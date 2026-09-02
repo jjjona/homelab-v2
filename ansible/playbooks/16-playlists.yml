@@ -86,7 +86,7 @@
         state: directory
         owner: "10001"
         group: "10001"
-        mode: "0750"
+        mode: "0770"
 
     - name: Write deployment environment
       ansible.builtin.copy:
