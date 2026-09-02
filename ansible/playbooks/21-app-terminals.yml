@@ -325,6 +325,8 @@
                 PROJECT_PORT: 4484
                 PROJECT_NO_OPEN: 1
                 GIT_SSH_COMMAND: ssh -F /home/workspace/.ssh/config
+                TODO_API_URL: http://192.168.0.165:4712/api
+                TODO_DB: /data/todo.db
               ports:
                 - "192.168.0.165:4720:4484"
               volumes:
@@ -458,7 +460,10 @@
           docker exec "$container" pi --version
           docker exec "$container" /opt/pi-working-discipline/install.sh check
           docker exec "$container" /opt/project-starter/project status
+          docker exec "$container" sh -lc 'test "$LANG" = C.UTF-8 && test "$LC_ALL" = C.UTF-8'
         done
+        docker exec todo-terminal sh -lc 'test -w "$TODO_DB" && curl -fsS "$TODO_API_URL/tasks" >/dev/null'
+        docker exec playlists-terminal sh -lc 'test -w /data && curl -fsS -H "Authorization: Bearer $PLAYLISTS_API_TOKEN" "$PLAYLISTS_API_URL/api/v1/playlists" >/dev/null'
       args:
         executable: /bin/sh
       when: not ansible_check_mode
