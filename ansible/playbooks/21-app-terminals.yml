@@ -320,6 +320,7 @@
                 PROJECT_BIND_HOST: 0.0.0.0
                 PROJECT_PORT: 4484
                 PROJECT_NO_OPEN: 1
+                GIT_SSH_COMMAND: ssh -F /home/workspace/.ssh/config
               ports:
                 - "192.168.0.165:4720:4484"
               volumes:
@@ -350,6 +351,7 @@
                 PROJECT_BIND_HOST: 0.0.0.0
                 PROJECT_PORT: 4484
                 PROJECT_NO_OPEN: 1
+                GIT_SSH_COMMAND: ssh -F /home/workspace/.ssh/config
                 PLAYLISTS_API_URL: http://192.168.0.165:4714
                 PLAYLISTS_API_TOKEN: {{ playlists_secrets.api_token | to_json }}
               ports:
