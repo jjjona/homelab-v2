@@ -198,3 +198,4 @@
         msg:
           - "UI: https://playlists.{{ domain }} (Tinyauth protected; HTTP {{ routed_ui.status }})"
           - "Agent API: https://playlists-api.{{ domain }}/api/v1/playlists (bearer token required for writes)"
+      when: not ansible_check_mode
