@@ -88,7 +88,10 @@ export SOPS_AGE_KEY_FILE="$HOME/.config/sops/age/keys.txt"
 ansible-playbook playbooks/18-hq.yml
 ansible-playbook playbooks/19-workspaces.yml
 ansible-playbook playbooks/20-hq-backups.yml
+ansible-playbook playbooks/21-app-terminals.yml
 ```
+
+`playbooks/21-app-terminals.yml` deploys the Tinyauth-protected Todo and Playlists terminal companions on Laptop 1. Each browser drawer attaches to a persistent Bash tmux session with Pi and the complete `pi-working-discipline` profile. These two terminals are deliberately production-coupled: they can edit their live checkout and app data, but they do not receive the Docker socket or homelab management credentials. Commit and push source changes before the normal application redeploy.
 
 Use `playbooks/17-forgejo-remotes.yml` only to reconverge the existing Writing, Todo, Playlists, and Hive checkout remotes. It does not restart those applications.
 
@@ -138,6 +141,13 @@ Keep the external management laptop as the break-glass path. HQ cannot repair it
 2. Run `playbooks/20-hq-backups.yml`.
 3. Restore `/srv/workspaces` when uncommitted work or Pi sessions are needed.
 4. Otherwise, recreate individual workspaces from Forgejo with `hq-workspace create <slug>`.
+
+### Recreate application terminals
+
+1. Restore `/opt/app-terminals` with the Laptop 1 backup when uncommitted work or Pi sessions are needed.
+2. Run `playbooks/21-app-terminals.yml` to rebuild the image, restore missing repository access, and start both terminals.
+3. Run `playbooks/11-laptops.yml --limit laptop1` to reconverge the backup job.
+4. Verify `todo-terminal.jnrm.eu` and `playlists-terminal.jnrm.eu` return Tinyauth's unauthenticated response.
 
 ## Deliberate limits
 

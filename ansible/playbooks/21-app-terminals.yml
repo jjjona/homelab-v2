@@ -1,0 +1,467 @@
+---
+# Production-coupled browser terminals for the Todo and Playlists applications.
+# Each terminal gets only its project checkout, project data, repository key,
+# Pi authentication, and Pi session state. Neither receives the Docker socket
+# or homelab management credentials.
+
+- name: Register terminal image build keys
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags: [app_terminals, forgejo]
+
+  vars:
+    hq_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/hq.sops.yml') | from_yaml }}"
+    forgejo_api: http://192.168.0.159:3001/api/v1
+    build_keys:
+      - repo: project-starter
+        title: workspace-image-project-starter
+        key: "{{ hq_secrets.workspace_starter_public_key }}"
+      - repo: pi-working-discipline
+        title: workspace-image-pi-discipline
+        key: "{{ hq_secrets.workspace_discipline_public_key }}"
+
+  tasks:
+    - name: List Forgejo repository build keys
+      ansible.builtin.uri:
+        url: "{{ forgejo_api }}/repos/jjjona/{{ item.repo }}/keys"
+        headers:
+          Authorization: "token {{ hq_secrets.forgejo_api_token }}"
+        return_content: true
+      loop: "{{ build_keys }}"
+      register: terminal_build_keys
+      check_mode: false
+      no_log: true
+
+    - name: Register missing read-only terminal build keys
+      ansible.builtin.uri:
+        url: "{{ forgejo_api }}/repos/jjjona/{{ item.item.repo }}/keys"
+        method: POST
+        headers:
+          Authorization: "token {{ hq_secrets.forgejo_api_token }}"
+        body_format: json
+        body:
+          title: "{{ item.item.title }}"
+          key: "{{ item.item.key }}"
+          read_only: true
+        status_code: 201
+      loop: "{{ terminal_build_keys.results }}"
+      when: >-
+        not ansible_check_mode and
+        (item.json | selectattr('title', 'equalto', item.item.title) | list | length) == 0
+      no_log: true
+
+- name: Deploy Todo and Playlists browser terminals
+  hosts: laptop1
+  gather_facts: false
+  tags: [app_terminals, deploy]
+
+  vars:
+    hq_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/hq.sops.yml') | from_yaml }}"
+    playlists_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/playlists.sops.yml') | from_yaml }}"
+    hive_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/hive.sops.yml') | from_yaml }}"
+    forgejo_api: http://192.168.0.159:3001/api/v1
+    image_dir: /opt/app-terminal-image
+    terminal_root: /opt/app-terminals
+    controller_pi_auth_file: "{{ lookup('env', 'HOME') }}/.pi/agent/auth.json"
+    terminal_projects:
+      - slug: todo
+        title: app-terminal-todo
+      - slug: playlists
+        title: app-terminal-playlists
+
+  tasks:
+    - name: Require local Pi authentication seed
+      ansible.builtin.stat:
+        path: "{{ controller_pi_auth_file }}"
+      delegate_to: localhost
+      become: false
+      register: terminal_pi_auth_source
+      no_log: true
+
+    - name: Stop when Pi authentication seed is absent
+      ansible.builtin.assert:
+        that: terminal_pi_auth_source.stat.isreg | default(false)
+        fail_msg: The controller Pi auth store is required to seed app terminals.
+      no_log: true
+
+    - name: Install terminal host prerequisites
+      ansible.builtin.command: apk add --no-cache git iptables openssh-client
+      changed_when: false
+
+    - name: Create terminal image and state directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: "{{ image_dir }}", owner: root, group: root, mode: "0755" }
+        - { path: "{{ terminal_root }}", owner: root, group: root, mode: "0755" }
+        - { path: "{{ terminal_root }}/todo", owner: "1000", group: "1000", mode: "0700" }
+        - { path: "{{ terminal_root }}/todo/ssh", owner: "1000", group: "1000", mode: "0700" }
+        - { path: "{{ terminal_root }}/todo/sessions", owner: "1000", group: "1000", mode: "0700" }
+        - { path: "{{ terminal_root }}/todo/runtime", owner: "1000", group: "1000", mode: "0700" }
+        - { path: "{{ terminal_root }}/playlists", owner: "1000", group: "1000", mode: "0700" }
+        - { path: "{{ terminal_root }}/playlists/ssh", owner: "1000", group: "1000", mode: "0700" }
+        - { path: "{{ terminal_root }}/playlists/sessions", owner: "1000", group: "1000", mode: "0700" }
+        - { path: "{{ terminal_root }}/playlists/runtime", owner: "1000", group: "1000", mode: "0700" }
+
+    - name: Seed per-terminal Pi authentication
+      ansible.builtin.copy:
+        src: "{{ controller_pi_auth_file }}"
+        dest: "{{ terminal_root }}/{{ item.slug }}/pi-auth.json"
+        owner: "1000"
+        group: "1000"
+        mode: "0600"
+        force: false
+      loop: "{{ terminal_projects }}"
+      no_log: true
+
+    - name: Generate repository-scoped terminal keys
+      ansible.builtin.command:
+        argv:
+          - ssh-keygen
+          - -q
+          - -t
+          - ed25519
+          - -N
+          - ""
+          - -C
+          - "{{ item.title }}"
+          - -f
+          - "{{ terminal_root }}/{{ item.slug }}/ssh/id_ed25519"
+      args:
+        creates: "{{ terminal_root }}/{{ item.slug }}/ssh/id_ed25519"
+      become: true
+      become_user: hive
+      loop: "{{ terminal_projects }}"
+      when: not ansible_check_mode
+      no_log: true
+
+    - name: Read terminal public keys
+      ansible.builtin.slurp:
+        src: "{{ terminal_root }}/{{ item.slug }}/ssh/id_ed25519.pub"
+      loop: "{{ terminal_projects }}"
+      register: terminal_public_keys
+      when: not ansible_check_mode
+      no_log: true
+
+    - name: List Forgejo terminal deploy keys
+      ansible.builtin.uri:
+        url: "{{ forgejo_api }}/repos/jjjona/{{ item.item.slug }}/keys"
+        headers:
+          Authorization: "token {{ hq_secrets.forgejo_api_token }}"
+        return_content: true
+      delegate_to: localhost
+      become: false
+      loop: "{{ terminal_public_keys.results }}"
+      register: current_terminal_keys
+      when: not ansible_check_mode
+      check_mode: false
+      no_log: true
+
+    - name: Reject a conflicting terminal deploy key
+      ansible.builtin.assert:
+        that: >-
+          (item.json | selectattr('title', 'equalto', item.item.item.title) | list | length) == 0 or
+          (item.json | selectattr('title', 'equalto', item.item.item.title) | map(attribute='key') | first) == (item.item.content | b64decode | trim)
+        fail_msg: "Forgejo already has a different {{ item.item.item.title }} key."
+      loop: "{{ current_terminal_keys.results | default([]) }}"
+      when: not ansible_check_mode
+      no_log: true
+
+    - name: Register missing writable terminal deploy keys
+      ansible.builtin.uri:
+        url: "{{ forgejo_api }}/repos/jjjona/{{ item.item.item.slug }}/keys"
+        method: POST
+        headers:
+          Authorization: "token {{ hq_secrets.forgejo_api_token }}"
+        body_format: json
+        body:
+          title: "{{ item.item.item.title }}"
+          key: "{{ item.item.content | b64decode | trim }}"
+          read_only: false
+        status_code: 201
+      delegate_to: localhost
+      become: false
+      loop: "{{ current_terminal_keys.results | default([]) }}"
+      when: >-
+        not ansible_check_mode and
+        (item.json | selectattr('title', 'equalto', item.item.item.title) | list | length) == 0
+      no_log: true
+
+    - name: Pin Forgejo host keys for app terminals
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../files/forgejo_known_hosts"
+        dest: "{{ terminal_root }}/{{ item.slug }}/ssh/known_hosts"
+        owner: "1000"
+        group: "1000"
+        mode: "0644"
+      loop: "{{ terminal_projects }}"
+
+    - name: Configure Forgejo SSH for app terminals
+      ansible.builtin.copy:
+        dest: "{{ terminal_root }}/{{ item.slug }}/ssh/config"
+        owner: "1000"
+        group: "1000"
+        mode: "0600"
+        content: |
+          Host 192.168.0.159
+              HostName 192.168.0.159
+              Port 2222
+              User git
+              IdentityFile /home/workspace/.ssh/id_ed25519
+              IdentitiesOnly yes
+              UserKnownHostsFile /home/workspace/.ssh/known_hosts
+              StrictHostKeyChecking yes
+      loop: "{{ terminal_projects }}"
+
+    - name: Install Project Starter image build key
+      ansible.builtin.copy:
+        dest: /root/.ssh/app-terminal-project-starter
+        content: "{{ hq_secrets.workspace_starter_private_key | trim }}\n"
+        mode: "0600"
+      no_log: true
+
+    - name: Install Pi profile image build key
+      ansible.builtin.copy:
+        dest: /root/.ssh/app-terminal-pi-profile
+        content: "{{ hq_secrets.workspace_discipline_private_key | trim }}\n"
+        mode: "0600"
+      no_log: true
+
+    - name: Clone Project Starter image source
+      ansible.builtin.git:
+        repo: ssh://git@192.168.0.159:2222/jjjona/project-starter.git
+        dest: "{{ image_dir }}/project-starter"
+        version: main
+        key_file: /root/.ssh/app-terminal-project-starter
+        ssh_opts: "-o UserKnownHostsFile={{ terminal_root }}/todo/ssh/known_hosts -o StrictHostKeyChecking=yes"
+      register: terminal_starter_source
+      when: not ansible_check_mode
+
+    - name: Clone Pi profile image source
+      ansible.builtin.git:
+        repo: ssh://git@192.168.0.159:2222/jjjona/pi-working-discipline.git
+        dest: "{{ image_dir }}/pi-working-discipline"
+        version: main
+        key_file: /root/.ssh/app-terminal-pi-profile
+        ssh_opts: "-o UserKnownHostsFile={{ terminal_root }}/todo/ssh/known_hosts -o StrictHostKeyChecking=yes"
+      register: terminal_profile_source
+      when: not ansible_check_mode
+
+    - name: Install app terminal image definition
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../hq/workspace/{{ item }}"
+        dest: "{{ image_dir }}/{{ item }}"
+        owner: root
+        group: root
+        mode: "{{ '0755' if item == 'start-workspace.sh' else '0644' }}"
+      loop:
+        - Dockerfile
+        - start-workspace.sh
+      register: terminal_image_definition
+
+    - name: Check app terminal image
+      ansible.builtin.command: docker image inspect hq-workspace:0.1
+      register: terminal_image
+      changed_when: false
+      failed_when: false
+
+    - name: Build current app terminal image
+      ansible.builtin.command: docker build -t hq-workspace:0.1 .
+      args:
+        chdir: "{{ image_dir }}"
+      when: >-
+        not ansible_check_mode and
+        (terminal_image.rc != 0 or
+        terminal_image_definition.changed or
+        terminal_starter_source.changed or
+        terminal_profile_source.changed)
+      changed_when: true
+
+    - name: Allow the Playlists terminal to manage project data
+      ansible.builtin.shell: |
+        set -eu
+        changed=false
+        if find /opt/playlists-data -type d -exec stat -c '%g %a' {} \; | grep -Evq '^10001 770$'; then changed=true; fi
+        if find /opt/playlists-data -type f -exec stat -c '%g %a' {} \; | grep -Evq '^10001 660$'; then changed=true; fi
+        chgrp -R 10001 /opt/playlists-data
+        find /opt/playlists-data -type d -exec chmod 0770 {} +
+        find /opt/playlists-data -type f -exec chmod 0660 {} +
+        $changed && echo changed || true
+      args:
+        executable: /bin/sh
+      register: playlist_data_permissions
+      changed_when: "'changed' in playlist_data_permissions.stdout_lines"
+
+    - name: Install app terminal Compose definition
+      ansible.builtin.copy:
+        dest: "{{ terminal_root }}/compose.yml"
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          services:
+            todo-terminal:
+              image: hq-workspace:0.1
+              container_name: todo-terminal
+              restart: unless-stopped
+              environment:
+                PROJECT_WORKSPACE_ROOT: /workspace
+                PROJECT_PUBLIC_ORIGIN: https://todo-terminal.{{ hive_secrets.domain }}
+                PROJECT_FRAME_ANCESTOR: https://todo.{{ hive_secrets.domain }}
+                PROJECT_AUTH_IDENTITY: {{ hq_secrets.hq_allowed_email | to_json }}
+                PROJECT_BIND_HOST: 0.0.0.0
+                PROJECT_PORT: 4484
+                PROJECT_NO_OPEN: 1
+              ports:
+                - "192.168.0.165:4720:4484"
+              volumes:
+                - /opt/todo:/workspace
+                - /opt/todo-data/todo:/data
+                - {{ terminal_root }}/todo/ssh:/home/workspace/.ssh:ro
+                - {{ terminal_root }}/todo/pi-auth.json:/home/workspace/.pi/agent/auth.json
+                - {{ terminal_root }}/todo/sessions:/home/workspace/.pi/agent/sessions
+                - {{ terminal_root }}/todo/runtime:/opt/project-starter/.project-runtime
+              labels:
+                - "traefik.enable=true"
+                - "traefik.http.routers.todo-terminal.rule=Host(`todo-terminal.{{ hive_secrets.domain }}`)"
+                - "traefik.http.routers.todo-terminal.entrypoints=web"
+                - "traefik.http.routers.todo-terminal.service=todo-terminal"
+                - "traefik.http.services.todo-terminal.loadbalancer.server.port=4720"
+                - "traefik.http.middlewares.todo-terminal-nocache.headers.customResponseHeaders.Cache-Control=no-store"
+                - "traefik.http.routers.todo-terminal.middlewares=todo-terminal-nocache"
+            playlists-terminal:
+              image: hq-workspace:0.1
+              container_name: playlists-terminal
+              restart: unless-stopped
+              group_add: ["10001"]
+              environment:
+                PROJECT_WORKSPACE_ROOT: /workspace
+                PROJECT_PUBLIC_ORIGIN: https://playlists-terminal.{{ hive_secrets.domain }}
+                PROJECT_FRAME_ANCESTOR: https://playlists.{{ hive_secrets.domain }}
+                PROJECT_AUTH_IDENTITY: {{ hq_secrets.hq_allowed_email | to_json }}
+                PROJECT_BIND_HOST: 0.0.0.0
+                PROJECT_PORT: 4484
+                PROJECT_NO_OPEN: 1
+                PLAYLISTS_API_URL: http://192.168.0.165:4714
+                PLAYLISTS_API_TOKEN: {{ playlists_secrets.api_token | to_json }}
+              ports:
+                - "192.168.0.165:4721:4484"
+              volumes:
+                - /opt/playlists:/workspace
+                - /opt/playlists-data:/data
+                - {{ terminal_root }}/playlists/ssh:/home/workspace/.ssh:ro
+                - {{ terminal_root }}/playlists/pi-auth.json:/home/workspace/.pi/agent/auth.json
+                - {{ terminal_root }}/playlists/sessions:/home/workspace/.pi/agent/sessions
+                - {{ terminal_root }}/playlists/runtime:/opt/project-starter/.project-runtime
+              labels:
+                - "traefik.enable=true"
+                - "traefik.http.routers.playlists-terminal.rule=Host(`playlists-terminal.{{ hive_secrets.domain }}`)"
+                - "traefik.http.routers.playlists-terminal.entrypoints=web"
+                - "traefik.http.routers.playlists-terminal.service=playlists-terminal"
+                - "traefik.http.services.playlists-terminal.loadbalancer.server.port=4721"
+                - "traefik.http.middlewares.playlists-terminal-nocache.headers.customResponseHeaders.Cache-Control=no-store"
+                - "traefik.http.routers.playlists-terminal.middlewares=playlists-terminal-nocache"
+      register: terminal_compose
+      no_log: true
+
+    - name: Recreate app terminals after a managed source change
+      ansible.builtin.command:
+        cmd: docker compose up -d --force-recreate
+        chdir: "{{ terminal_root }}"
+      when: >-
+        not ansible_check_mode and
+        (terminal_image.rc != 0 or
+        terminal_compose.changed or
+        terminal_image_definition.changed or
+        terminal_starter_source.changed or
+        terminal_profile_source.changed)
+      changed_when: true
+
+    - name: Keep unchanged app terminals running
+      ansible.builtin.command:
+        cmd: docker compose up -d
+        chdir: "{{ terminal_root }}"
+      register: terminal_compose_up
+      when: >-
+        not ansible_check_mode and
+        terminal_image.rc == 0 and
+        not terminal_compose.changed and
+        not terminal_image_definition.changed and
+        not terminal_starter_source.changed and
+        not terminal_profile_source.changed
+      changed_when: >-
+        'Created' in (terminal_compose_up.stdout + terminal_compose_up.stderr) or
+        'Started' in (terminal_compose_up.stdout + terminal_compose_up.stderr)
+
+    - name: Check app terminal containers
+      ansible.builtin.command:
+        cmd: docker compose ps --status running --quiet
+        chdir: "{{ terminal_root }}"
+      register: running_app_terminals
+      when: not ansible_check_mode
+      changed_when: false
+      failed_when: running_app_terminals.stdout_lines | length != 2
+
+    - name: Install app terminal ingress firewall
+      ansible.builtin.copy:
+        dest: /usr/local/sbin/app-terminal-firewall
+        owner: root
+        group: root
+        mode: "0755"
+        content: |
+          #!/bin/sh
+          set -eu
+          iptables -C DOCKER-USER -s 192.168.0.159 -p tcp -m conntrack --ctstate NEW --ctorigdstport 4720:4721 -j ACCEPT 2>/dev/null ||
+            iptables -I DOCKER-USER 1 -s 192.168.0.159 -p tcp -m conntrack --ctstate NEW --ctorigdstport 4720:4721 -j ACCEPT
+          iptables -C DOCKER-USER -p tcp -m conntrack --ctstate NEW --ctorigdstport 4720:4721 -j DROP 2>/dev/null ||
+            iptables -I DOCKER-USER 2 -p tcp -m conntrack --ctstate NEW --ctorigdstport 4720:4721 -j DROP
+      register: app_terminal_firewall
+
+    - name: Apply app terminal ingress firewall
+      ansible.builtin.command: /usr/local/sbin/app-terminal-firewall
+      changed_when: app_terminal_firewall.changed
+
+    - name: Persist app terminal ingress firewall
+      ansible.builtin.copy:
+        src: /usr/local/sbin/app-terminal-firewall
+        dest: /etc/local.d/app-terminals.start
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0755"
+      when: not ansible_check_mode
+
+    - name: Enable Alpine local startup scripts
+      ansible.builtin.service:
+        name: local
+        enabled: true
+        state: started
+
+    - name: Verify Pi and the complete profile in both terminals
+      ansible.builtin.shell: |
+        set -eu
+        for container in todo-terminal playlists-terminal; do
+          docker exec "$container" pi --version
+          docker exec "$container" /opt/pi-working-discipline/install.sh check
+          docker exec "$container" /opt/project-starter/project status
+        done
+      args:
+        executable: /bin/sh
+      when: not ansible_check_mode
+      changed_when: false
+
+- name: Refresh Traefik for app terminal routes
+  hosts: docker_host
+  gather_facts: false
+  tags: [app_terminals, traefik]
+
+  tasks:
+    - name: Restart Traefik for terminal routes
+      ansible.builtin.command: docker restart traefik
+      changed_when: true

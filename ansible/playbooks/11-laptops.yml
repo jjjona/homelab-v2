@@ -511,16 +511,22 @@
           - /opt/writing
           - /var/lib/docker/volumes/writing_writing-codex/_data
           - /var/lib/docker/volumes/writing_writing-state/_data
-          # todo app data: SQLite task db + ntfy auth/cache (14-todo.yml)
+          # todo app checkout and data: uncommitted terminal edits, SQLite, ntfy.
+          - /opt/todo
           - /opt/todo-data
-          # playlist metadata imported through the machine API (16-playlists.yml)
+          # playlist checkout and data: uncommitted terminal edits and metadata.
+          - /opt/playlists
           - /opt/playlists-data
+          # Browser-terminal repository keys, Pi auth/session state, and tmux runtime.
+          - /opt/app-terminals
         pause_containers:
           - arcane-edge-agent
           - writing-studio
           - todo
           - ntfy
           - playlists
+          - todo-terminal
+          - playlists-terminal
       laptop2:
         healthchecks_url: "{{ backup.laptop2_healthchecks_url }}"
         cron_hour: "4"
