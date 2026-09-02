@@ -87,8 +87,12 @@
       no_log: true
 
     - name: Install terminal host prerequisites
-      ansible.builtin.command: apk add --no-cache git iptables openssh-client
-      changed_when: false
+      ansible.builtin.package:
+        name:
+          - git
+          - iptables
+          - openssh-client
+        state: present
 
     - name: Create terminal image and state directories
       ansible.builtin.file:
@@ -460,6 +464,16 @@
       when: not ansible_check_mode
       changed_when: false
 
+    - name: Record whether terminal routes changed
+      ansible.builtin.set_fact:
+        app_terminal_routes_changed: >-
+          {{ terminal_compose.changed or
+             terminal_image_definition.changed or
+             terminal_starter_source.changed or
+             terminal_profile_source.changed or
+             (terminal_compose_up.changed | default(false)) }}
+      changed_when: false
+
 - name: Refresh Traefik for app terminal routes
   hosts: docker_host
   gather_facts: false
@@ -468,4 +482,5 @@
   tasks:
     - name: Restart Traefik for terminal routes
       ansible.builtin.command: docker restart traefik
+      when: hostvars['laptop1'].app_terminal_routes_changed | bool
       changed_when: true
