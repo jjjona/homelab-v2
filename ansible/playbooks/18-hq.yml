@@ -486,13 +486,13 @@
       register: hq_profile_install
       changed_when: "'profile updated' in hq_profile_install.stdout"
 
-    - name: Install Project Starter dependencies
+    - name: Install locked Project Starter dependencies
       ansible.builtin.command: bun install --frozen-lockfile
       args:
         chdir: "{{ project_starter }}"
-        creates: "{{ project_starter }}/node_modules/@xterm/xterm"
       become: true
       become_user: hq
+      changed_when: false
 
     - name: Build Project Starter browser assets
       ansible.builtin.command: bun run build
