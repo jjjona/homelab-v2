@@ -521,6 +521,30 @@
       }
     },
     {
+      "slug": "opportunities",
+      "forgejo_owner": "jjjona",
+      "source": "forgejo",
+      "class": "workspace",
+      "deployment": "none",
+      "github": {
+        "owner": "jjjona",
+        "name": "opportunities",
+        "url": "https://github.com/jjjona/opportunities",
+        "private": true,
+        "archived": false,
+        "default_branch": "main",
+        "description": "Opportunity Miner: auditable procurement evidence, hypotheses, and daily private reports",
+        "fork": false,
+        "template": false,
+        "issues": true,
+        "wiki": true,
+        "projects": true,
+        "disk_kib": 0,
+        "updated_at": ""
+      },
+      "workspace_port": 46001
+    },
+    {
       "slug": "pi-working-discipline",
       "forgejo_owner": "jjjona",
       "class": "tooling",
