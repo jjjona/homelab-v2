@@ -32,6 +32,30 @@
       }
     },
     {
+      "slug": "agent-guide",
+      "forgejo_owner": "jjjona",
+      "source": "forgejo",
+      "class": "workspace",
+      "deployment": "none",
+      "github": {
+        "owner": "jjjona",
+        "name": "agent-guide",
+        "url": "https://github.com/jjjona/agent-guide",
+        "private": true,
+        "archived": false,
+        "default_branch": "main",
+        "description": "Source-backed code, style, writing, and workflow guidelines for humans and agents",
+        "fork": false,
+        "template": false,
+        "issues": true,
+        "wiki": true,
+        "projects": true,
+        "disk_kib": 0,
+        "updated_at": ""
+      },
+      "workspace_port": 46002
+    },
+    {
       "slug": "agentic-work",
       "forgejo_owner": "jjjona",
       "class": "workspace",
