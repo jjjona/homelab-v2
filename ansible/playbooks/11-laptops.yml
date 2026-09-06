@@ -519,6 +519,11 @@
           - /opt/playlists-data
           # Browser-terminal repository keys, Pi auth/session state, and tmux runtime.
           - /opt/app-terminals
+          # Opportunity Miner: SQLite, raw notices, reports, Pi auth, and deployment manifest.
+          - /opt/opportunities/data
+          - /opt/opportunities/reports
+          - /opt/opportunities/pi
+          - /opt/opportunities/compose.yml
         pause_containers:
           - arcane-edge-agent
           - writing-studio
@@ -527,6 +532,7 @@
           - playlists
           - todo-terminal
           - playlists-terminal
+          - opportunities
       laptop2:
         healthchecks_url: "{{ backup.laptop2_healthchecks_url }}"
         cron_hour: "4"
@@ -598,6 +604,7 @@
       when: restic_check.rc != 0
 
     - name: Deploy restic backup script
+      tags: [opportunities_backup]
       ansible.builtin.copy:
         dest: "{{ backup_script }}"
         content: |

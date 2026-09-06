@@ -548,8 +548,10 @@
       "slug": "opportunities",
       "forgejo_owner": "jjjona",
       "source": "forgejo",
-      "class": "workspace",
-      "deployment": "none",
+      "class": "deployed",
+      "deployment": "laptop1",
+      "application_host": "opportunities.jnrm.eu",
+      "deployment_playbook": "ansible/playbooks/22-opportunities.yml",
       "github": {
         "owner": "jjjona",
         "name": "opportunities",

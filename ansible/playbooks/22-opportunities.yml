@@ -1,0 +1,221 @@
+---
+# Deploy a tested, immutable Opportunity Miner revision from canonical Forgejo.
+# Example (from ansible/):
+# ansible-playbook playbooks/22-opportunities.yml -e opportunities_revision=<40-char-sha>
+# Runtime: Laptop 1; private reports: opportunities.jnrm.eu; daily backend run.
+# /opt/opportunities/{data,reports,pi} are covered by 11-laptops.yml backups.
+
+- name: Deploy Opportunity Miner on Laptop 1
+  hosts: laptop1
+  gather_facts: false
+  tags: [opportunities, deploy]
+  vars:
+    opportunities_root: /opt/opportunities
+    opportunities_port: 4715
+    opportunities_host: opportunities.jnrm.eu
+    hq_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/hq.sops.yml') | from_yaml }}"
+    controller_pi_auth_file: "{{ lookup('env', 'HOME') }}/.pi/agent/auth.json"
+
+  pre_tasks:
+    - name: Require an immutable tested source revision
+      ansible.builtin.assert:
+        that:
+          - opportunities_revision is defined
+          - opportunities_revision is match('^[0-9a-f]{40}$')
+        fail_msg: Supply the tested Forgejo commit as opportunities_revision (40 lowercase hex characters).
+
+    - name: Check Docker without exposing container environments
+      ansible.builtin.command: docker version --format '{% raw %}{{.Server.Version}}{% endraw %}'
+      changed_when: false
+      check_mode: false
+
+    - name: Require existing Pi subscription authentication
+      ansible.builtin.stat:
+        path: "{{ controller_pi_auth_file }}"
+      delegate_to: localhost
+      become: false
+      register: opportunities_auth_source
+      no_log: true
+
+    - name: Stop when the Pi authentication seed is missing
+      ansible.builtin.assert:
+        that: opportunities_auth_source.stat.isreg | default(false)
+        fail_msg: Restore the existing Pi subscription login; do not create an API key for this application.
+      no_log: true
+
+  tasks:
+    - name: Create application and persistent state directories
+      ansible.builtin.file:
+        path: "{{ opportunities_root }}/{{ item }}"
+        state: directory
+        owner: "1000"
+        group: "1000"
+        mode: "{{ '0700' if item == 'pi' else '0750' }}"
+      loop: ['', releases, data, reports, pi]
+
+    - name: Seed Pi authentication once outside the source tree
+      ansible.builtin.copy:
+        src: "{{ controller_pi_auth_file }}"
+        dest: "{{ opportunities_root }}/pi/auth.json"
+        owner: "1000"
+        group: "1000"
+        mode: "0600"
+        force: false
+      no_log: true
+
+    - name: Create immutable release directory
+      ansible.builtin.file:
+        path: "{{ opportunities_root }}/releases/{{ opportunities_revision }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Download the canonical source archive without persisting the API token
+      ansible.builtin.get_url:
+        url: "http://192.168.0.159:3001/api/v1/repos/jjjona/opportunities/archive/{{ opportunities_revision }}.tar.gz"
+        headers:
+          Authorization: "token {{ hq_secrets.forgejo_api_token }}"
+        dest: "{{ opportunities_root }}/releases/{{ opportunities_revision }}.tar.gz"
+        mode: "0600"
+        force: false
+      no_log: true
+      when: not ansible_check_mode
+
+    # Alpine ships BusyBox tar; Ansible's unarchive handler requires GNU tar.
+    # Mark completion only after extraction succeeds so interrupted applies retry.
+    - name: Unpack the immutable source revision with native Alpine tar
+      ansible.builtin.shell: >-
+        tar -xzf {{ opportunities_root }}/releases/{{ opportunities_revision }}.tar.gz
+        --strip-components=1 -C {{ opportunities_root }}/releases/{{ opportunities_revision }} &&
+        touch {{ opportunities_root }}/releases/{{ opportunities_revision }}/.source-extracted
+      args:
+        executable: /bin/sh
+        creates: "{{ opportunities_root }}/releases/{{ opportunities_revision }}/.source-extracted"
+      when: not ansible_check_mode
+
+    # Block direct LAN access before publishing the container port. The backend
+    # validates Host and the identity forwarded by the authenticating proxy.
+    - name: Install Opportunity Miner ingress firewall
+      ansible.builtin.copy:
+        dest: /usr/local/sbin/opportunities-firewall
+        validate: /bin/sh -n %s
+        owner: root
+        group: root
+        mode: "0755"
+        content: |
+          #!/bin/sh
+          set -eu
+          iptables -C DOCKER-USER -s 192.168.0.159 -p tcp -m conntrack --ctstate NEW --ctorigdstport {{ opportunities_port }} -j ACCEPT 2>/dev/null ||
+            iptables -I DOCKER-USER 1 -s 192.168.0.159 -p tcp -m conntrack --ctstate NEW --ctorigdstport {{ opportunities_port }} -j ACCEPT
+          iptables -C DOCKER-USER -p tcp -m conntrack --ctstate NEW --ctorigdstport {{ opportunities_port }} -j DROP 2>/dev/null ||
+            iptables -I DOCKER-USER 2 -p tcp -m conntrack --ctstate NEW --ctorigdstport {{ opportunities_port }} -j DROP
+      register: opportunities_firewall
+
+    - name: Apply ingress firewall before starting the application
+      ansible.builtin.command: /usr/local/sbin/opportunities-firewall
+      changed_when: opportunities_firewall.changed
+      when: not ansible_check_mode
+
+    - name: Persist ingress firewall on host startup
+      ansible.builtin.copy:
+        src: /usr/local/sbin/opportunities-firewall
+        dest: /etc/local.d/opportunities.start
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0755"
+      when: not ansible_check_mode
+
+    - name: Enable Alpine startup scripts
+      ansible.builtin.service:
+        name: local
+        enabled: true
+        state: started
+
+    - name: Install single-process application manifest
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../templates/opportunities-compose.yml.j2"
+        dest: "{{ opportunities_root }}/compose.yml"
+        validate: docker compose -p opportunities -f %s config --quiet
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+
+    - name: Build and start the tested revision
+      ansible.builtin.command:
+        cmd: docker compose up -d --build
+        chdir: "{{ opportunities_root }}"
+      register: opportunities_up
+      changed_when: >-
+        'Built' in (opportunities_up.stdout + opportunities_up.stderr) or
+        'Created' in (opportunities_up.stdout + opportunities_up.stderr) or
+        'Started' in (opportunities_up.stdout + opportunities_up.stderr) or
+        'Recreated' in (opportunities_up.stdout + opportunities_up.stderr)
+      when: not ansible_check_mode
+
+    - name: Wait for the report service health endpoint
+      ansible.builtin.uri:
+        url: "http://192.168.0.165:{{ opportunities_port }}/healthz"
+        status_code: 200
+        return_content: false
+      register: opportunities_health
+      retries: 30
+      delay: 3
+      until: opportunities_health.status == 200
+      when: not ansible_check_mode
+
+    - name: Verify direct requests cannot read reports without identity
+      ansible.builtin.uri:
+        url: "http://192.168.0.165:{{ opportunities_port }}/"
+        headers:
+          Host: "{{ opportunities_host }}"
+        follow_redirects: none
+        status_code: [401, 403]
+      when: not ansible_check_mode
+
+- name: Route Opportunity Miner through the existing authentication gate
+  hosts: docker_host
+  gather_facts: false
+  tags: [opportunities, routing]
+  tasks:
+    - name: Install private report route through the authenticated web entrypoint
+      ansible.builtin.copy:
+        dest: /mnt/data/docker/core/traefik/dynamic/opportunities.yml
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          http:
+            routers:
+              opportunities:
+                rule: "Host(`opportunities.jnrm.eu`)"
+                entryPoints: [web]
+                service: opportunities
+                middlewares: [opportunities-nocache]
+            services:
+              opportunities:
+                loadBalancer:
+                  servers:
+                    - url: "http://192.168.0.165:4715"
+            middlewares:
+              opportunities-nocache:
+                headers:
+                  customResponseHeaders:
+                    Cache-Control: "no-store"
+
+    # Cloudflare's existing final ingress routes all remaining hosts to :80.
+    # The file provider watches this directory, so neither proxy needs restart.
+    - name: Verify unauthenticated requests do not receive private reports
+      ansible.builtin.uri:
+        url: http://127.0.0.1:80/
+        headers:
+          Host: opportunities.jnrm.eu
+        follow_redirects: none
+        status_code: [302, 303, 401, 403]
+      register: opportunities_route
+      retries: 10
+      delay: 2
+      until: opportunities_route.status in [302, 303, 401, 403]
+      when: not ansible_check_mode

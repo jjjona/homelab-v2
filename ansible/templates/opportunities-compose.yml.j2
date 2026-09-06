@@ -1,0 +1,33 @@
+services:
+  opportunities:
+    image: opportunities:{{ opportunities_revision }}
+    build: ./releases/{{ opportunities_revision }}
+    container_name: opportunities
+    restart: unless-stopped
+    user: "1000:1000"
+    init: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    ports:
+      - "192.168.0.165:{{ opportunities_port }}:3000"
+    environment:
+      HOST: 0.0.0.0
+      PORT: "3000"
+      PUBLIC_ORIGIN: "https://{{ opportunities_host }}"
+      AUTH_EMAIL: {{ hq_secrets.hq_allowed_email | to_json }}
+      DATA_DIR: /data
+      REPORTS_DIR: /reports
+      PI_CODING_AGENT_DIR: /home/bun/.pi/agent
+      PI_OFFLINE: "1"
+      PI_TELEMETRY: "0"
+      DAILY_LLM_BUDGET_EUR: "1.00"
+      MINER_UTC_HOUR: "6"
+    volumes:
+      - ./data:/data
+      - ./reports:/reports
+      - ./pi:/home/bun/.pi/agent
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

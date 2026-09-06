@@ -93,6 +93,8 @@ ansible-playbook playbooks/21-app-terminals.yml
 
 `playbooks/21-app-terminals.yml` deploys the Tinyauth-protected Todo and Playlists terminal companions on Laptop 1. Each browser drawer attaches to a persistent Bash tmux session with Pi and the complete `pi-working-discipline` profile. These two terminals are deliberately production-coupled: they can edit their live checkout and app data, but they do not receive the Docker socket or homelab management credentials. Commit and push source changes before the normal application redeploy.
 
+`playbooks/22-opportunities.yml` deploys Opportunity Miner's daily backend and private reports on Laptop 1 from a tested Forgejo commit. See [Opportunity Miner operations](opportunities.md) for deployment, subscription usage accounting, and recovery.
+
 Use `playbooks/17-forgejo-remotes.yml` only to reconverge the existing Writing, Todo, Playlists, and Hive checkout remotes. It does not restart those applications.
 
 The remote-capable Project Starter remains usable locally. Its managed remote mode is documented in its own `README.md` and tests.
