@@ -18,9 +18,9 @@ services:
       DATA_DIR: /data
       REPORTS_DIR: /reports
       PI_CODING_AGENT_DIR: /home/bun/.pi/agent
-      PI_OFFLINE: "1"
+      # The app refreshes the native catalog only if its required model is missing.
       PI_TELEMETRY: "0"
-      DAILY_LLM_BUDGET_EUR: "1.00"
+      LLM_MAX_CALLS_PER_RUN: "16"
       MINER_UTC_HOUR: "6"
     volumes:
       - ./data:/data
