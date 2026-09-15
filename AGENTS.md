@@ -64,3 +64,11 @@ The `hive`, `writing`, and `todo` aliases have interactive `RemoteCommand` setti
 8. Verify live state independently and report exact checks and remaining drift.
 
 Do not commit or push unless explicitly requested. Keep commits small and never mix unrelated pre-existing changes into a commit.
+
+## Shared reports and files
+
+Use the private read-only library at `https://hq.jnrm.eu/files/` for reports and other substantial file-based handoffs. Its only publishing root is `/srv/hq-files`, owned by `hq` and included in the encrypted HQ backup.
+
+Publish reviewed copies under a descriptive folder such as `/srv/hq-files/reports/<topic>-<date>/REPORT.md`, then give the user the corresponding `/files/reports/<topic>-<date>/REPORT.md` URL. Keep source artifacts unless deletion was explicitly requested. Do not overwrite an existing publication without reviewing the change.
+
+Never publish repositories or home directories wholesale, credentials, `.env` files, auth stores, private keys, or symlinks/hardlinks. Project workspaces do not receive management identities to publish files; transfer only reviewed artifacts through HQ. See `docs/hq.md` for previews, downloads, deployment and recovery.

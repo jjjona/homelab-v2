@@ -17,6 +17,7 @@
         - /home/hq/.config/sops
         - /home/hq/.config/gh
         - /home/hq/.ssh
+        - /srv/hq-files
       workspaces:
         - /srv/workspaces
     backup_schedule:
@@ -65,6 +66,7 @@
       args:
         executable: /bin/sh
       changed_when: false
+      tags: [hq-files]
 
     - name: Install HQ state backup script
       ansible.builtin.copy:
@@ -105,6 +107,7 @@
             exit "$code"
           fi
       no_log: true
+      tags: [hq-files]
 
     - name: Schedule state backup
       ansible.builtin.cron:

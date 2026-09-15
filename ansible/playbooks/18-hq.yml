@@ -439,12 +439,13 @@
       ansible.builtin.git:
         repo: "{{ forgejo_base }}/project-starter.git"
         dest: "{{ project_starter }}"
-        version: main
+        version: "{{ hq_project_starter_version | default('main') }}"
         key_file: "{{ hq_home }}/.ssh/id_ed25519"
         ssh_opts: "-o UserKnownHostsFile={{ hq_home }}/.ssh/known_hosts -o StrictHostKeyChecking=yes"
       become: true
       become_user: hq
       register: hq_project_starter_source
+      tags: [hq-files]
 
     - name: Clone homelab from Forgejo
       ansible.builtin.git:
@@ -514,6 +515,15 @@
         key: "{{ hq_secrets.hq_ssh_public_key }}"
         state: present
 
+    - name: Create dedicated HQ publishing directory
+      ansible.builtin.file:
+        path: /srv/hq-files
+        state: directory
+        owner: hq
+        group: hq
+        mode: "0750"
+      tags: [hq-files]
+
     - name: Configure HQ terminal service
       ansible.builtin.copy:
         dest: /etc/systemd/system/hq.service
@@ -537,6 +547,7 @@
           Environment=LC_ALL=C.UTF-8
           Environment=TERM=xterm-256color
           Environment=PROJECT_WORKSPACE_ROOT={{ homelab_repo }}
+          Environment=PROJECT_FILES_ROOT=/srv/hq-files
           Environment=PROJECT_PUBLIC_ORIGIN=https://hq.jnrm.eu
           Environment=PROJECT_AUTH_IDENTITY={{ hq_secrets.hq_allowed_email }}
           Environment=PROJECT_BIND_HOST=0.0.0.0
@@ -550,11 +561,13 @@
           WantedBy=multi-user.target
       no_log: true
       register: hq_service_unit
+      tags: [hq-files]
 
     - name: Reload systemd for HQ service
       ansible.builtin.systemd:
         daemon_reload: true
       when: hq_service_unit.changed
+      tags: [hq-files]
 
     - name: Start HQ terminal service
       ansible.builtin.systemd:
@@ -562,12 +575,14 @@
         enabled: true
         state: restarted
       when: hq_service_unit.changed or hq_project_starter_source.changed
+      tags: [hq-files]
 
     - name: Ensure HQ terminal service is running
       ansible.builtin.systemd:
         name: hq
         enabled: true
         state: started
+      tags: [hq-files]
 
     - name: Install HQ nftables policy
       ansible.builtin.copy:
