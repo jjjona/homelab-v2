@@ -771,6 +771,31 @@
       }
     },
     {
+      "slug": "trade",
+      "forgejo_owner": "jjjona",
+      "source": "forgejo",
+      "class": "workspace",
+      "deployment": "none",
+      "workspace_host": "trade.jnrm.eu",
+      "github": {
+        "owner": "jjjona",
+        "name": "trade",
+        "url": "https://github.com/jjjona/trade",
+        "private": true,
+        "archived": false,
+        "default_branch": "main",
+        "description": "Unfunded, reproducible Belgian retail trading validation with realistic costs and risk limits",
+        "fork": false,
+        "template": false,
+        "issues": true,
+        "wiki": true,
+        "projects": true,
+        "disk_kib": 0,
+        "updated_at": ""
+      },
+      "workspace_port": 46003
+    },
+    {
       "slug": "writing",
       "forgejo_owner": "jjjona",
       "class": "deployed",
