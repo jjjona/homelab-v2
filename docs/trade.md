@@ -2,7 +2,7 @@
 
 ## Purpose and boundary
 
-Trade is a private, unfunded research project generated from Project Starter. Its first goal is to test the fixed BTC/EUR momentum and reversal hypotheses in the [research contract](https://hq.jnrm.eu/files/reports/automated-trading-2026-09-14/REPORT.md).
+Trade is a private, unfunded research project generated from Project Starter. Its current goal is unleveraged, short-horizon EUR returns above broad equity trackers after costs, not a monthly income target. The user accepts tracker-like drawdowns; old assistant-proposed risk limits remain fixed in old experiments but do not automatically govern new rules. Prefer €100, with a €1,000 ceiling. The original [research contract](https://hq.jnrm.eu/files/reports/automated-trading-2026-09-14/REPORT.md) remains historical evidence.
 
 - Canonical repository: `https://git.jnrm.eu/jjjona/trade`.
 - GitHub: private one-way mirror, managed by Forgejo.
@@ -13,6 +13,18 @@ Trade is a private, unfunded research project generated from Project Starter. It
 This URL opens the project terminal. It is not a live trading service, public dashboard or claim of profitability. No exchange account, deposit or order is authorized. There is no automatic promotion to paper or live execution.
 
 ## Current research result
+
+The first combined-information hypothesis, FUND-FLOW, completed eight €100 native accounts and 221 trades. Its base-cost primary returned **−6.48% in 2020–2022 and +14.88% in 2023–2024**, versus **+17.34% and +45.44% for gross VWCE**. It did not pass the preregistered screen. The ETF reference is gross and idealized, not a verified broker-specific or personal-tax-complete account; this does not prove inferiority to every net tracker implementation.
+
+All eight paths were rejected for exposed execution-data gaps, not the old 5% drawdown cutoff. Six of 16 validation primary trades exited early on unavailable data. No threshold, holding-period, risk, input or account retuning followed. One of at most three new hypothesis slots is used; the others remain unused. No capital extension, holdout access or service deployment is authorized.
+
+- [Reviewed FUND-FLOW report and evidence](https://hq.jnrm.eu/files/reports/trade-funding-flow-2026-09-16/REPORT.md).
+- Pre-P&L source commit: `5185402`. Final report commit: `8bf4a4c90c4ef1a5f05659ac45221a7757ee7f7d`; Forgejo push and GitHub mirror verified.
+- Checks: 52 Python tests, 12 Bun tests/139 assertions, static/types/build checks, 38 legacy and 10 new native checks. Independent/parent audits verified the fit and schedules, 221 trades, 2,104,704 pre-fill equity marks and both ETF references. Read-only Terra review found no blocking misstatement; it was not independent numerical recomputation. Failed helpers remain retained.
+- Authenticated preview and all 18 downloads passed; missing/wrong identity, Host and Origin failed; public unauthenticated access returned HTTP 401. Report SHA-256: `4e05ef199c8f137d7a2d9ab602be1bc4f43c61e4afba6adbf908ea56562c6d5e`.
+- All 18 publication files were dumped from encrypted HQ snapshot `0666058cd8cef8ccfa687a9eeec6ea48284a52e6904fd31466730f77f66f544a` and byte-checked. No manual workspace-wide pause backup ran; full workspace artifacts remain under the existing scheduled backup scope. Prior reports remain unchanged.
+
+### Completed income batch
 
 The bounded 2026-09-16 income batch completed **112 €100 native account attempts with €0 hosting**: 64 corrected accounts for M24/R24/ETHSHOCK and 48 for three new preregistered rules. All 24 primary paths lost money. Validation base results were M24 −€1.88, R24 −€3.78, ETHSHOCK −€1.46, relative strength −€5.21, relative reversal −€2.28 and volume breakout −€3.33. No larger-capital extension qualified; the current ceiling is €1,000. No curve was scaled, holdout opened or trading service deployed.
 
@@ -48,7 +60,7 @@ Published report SHA-256: `623a897187e70c8e5d1af3a9042f2d115cd72e8be34a6a6b3e6b4
 
 ## Working on the project
 
-Read the project's `AGENTS.md`, `README.md`, current `reports/income-batch1-v1/REPORT.md`, `research/discovery-plan-20260916.md` and `research/discovery-clarifications-20260916.md`. Retain the earlier `reports/eth-shock-v1/REPORT.md` and `research/eth-shock-plan.md`, plus `reports/stage2-eur100-v2/REPORT.md`, `research/stage2-policy.json`, and original `docs/research/REPORT.md`. `BUILD.md` describes the earlier implementation slice. The project adopts the shared Agent Guide coding baseline, meaningful behavioral tests, reproducible dependencies, independent review and the existing Project Starter checks. Financial and data-quality claims need their own evidence; passing code checks does not establish profit.
+Read the project's `AGENTS.md`, `README.md`, current `reports/fund-flow-v1/REPORT.md`, `research/edge-search-20260916.md`, and the three `research/funding-flow-*.md` contract files. Keep the 2025–2026 holdout closed unless the user explicitly authorizes access. Retain `reports/income-batch1-v1/REPORT.md`, `research/discovery-plan-20260916.md` and `research/discovery-clarifications-20260916.md` as earlier evidence. Retain the earlier `reports/eth-shock-v1/REPORT.md` and `research/eth-shock-plan.md`, plus `reports/stage2-eur100-v2/REPORT.md`, `research/stage2-policy.json`, and original `docs/research/REPORT.md`. `BUILD.md` describes the earlier implementation slice. The project adopts the shared Agent Guide coding baseline, meaningful behavioral tests, reproducible dependencies, independent review and the existing Project Starter checks. Financial and data-quality claims need their own evidence; passing code checks does not establish profit.
 
 Create or resume the workspace with the existing manager command:
 
