@@ -14,6 +14,16 @@ This URL opens the project terminal. It is not a live trading service, public da
 
 ## Current research result
 
+The separately registered 2026-09-16 ETH shock-reversal experiment also failed. All 40 €100 account attempts completed; all eight primary paths were rejected. In 2023–2024, the base/€1-month primary returned −€24.06. The unhalted trading component was −€1.22 after friction, before hosting. Only seven eligible signals occurred. This is additional development evidence, not a fresh final holdout or a claim about every short-term strategy.
+
+- [Reviewed ETH result and evidence](https://hq.jnrm.eu/files/reports/trade-eth-shock-2026-09-16/REPORT.md).
+- Trade source commit: `c3ceb0924f22c7d2f6d79d8275f1291f15f2e6c8` (Forgejo push and GitHub mirror verified).
+- Verification: 36 named native checks; 19 Python tests; 12 Bun tests/139 assertions; static/types/build checks; independent source and result reviews. A separate numerical audit reconciled all 40 accounts and checked 135 active entries. No invalid fills or callback failures occurred.
+- ETH raw completeness remains blocked: 27,738 missing five-minute intervals. All exposure-matched comparators were unavailable; primary uncertainty was inconclusive. No parameter retuning, new dependency/service, final-holdout access or trading authorization followed.
+- Authenticated preview and all eight downloads passed; public unauthenticated access returned HTTP 401. Report SHA-256: `fdf69a489815f65c7c91cd4e869a28bd5ca6937aa8f45114a4bead26b2ef7766`. Encrypted HQ snapshot `057e27f4ab755d4e115d88b9c47e4dd37696225e5f15b3225ac45091567ab3e2` contains the byte-verified report. Workspace-wide manual backup was not run because it pauses all workspaces; scheduled coverage remains unchanged.
+
+### Earlier BTC experiment
+
 The 2026-09-15 study completed 72 independent €100 native backtests. Neither fixed hypothesis qualified. For validation in 2023–2024, base friction and €1/month operating allocation produced economic losses of €23.51 for momentum and €24.79 for reversal. Unhalted diagnostics also lost money after trading friction, before operating costs. These are conditional historical results, not forecasts or personal-tax calculations.
 
 - [Reviewed result and evidence](https://hq.jnrm.eu/files/reports/trade-eur100-2026-09-15/REPORT.md).
@@ -27,7 +37,7 @@ Published report SHA-256: `623a897187e70c8e5d1af3a9042f2d115cd72e8be34a6a6b3e6b4
 
 ## Working on the project
 
-Read the project's `AGENTS.md`, `README.md`, current `reports/stage2-eur100-v2/REPORT.md`, `research/stage2-policy.json`, and original `docs/research/REPORT.md`. `BUILD.md` describes the earlier implementation slice. The project adopts the shared Agent Guide coding baseline, meaningful behavioral tests, reproducible dependencies, independent review and the existing Project Starter checks. Financial and data-quality claims need their own evidence; passing code checks does not establish profit.
+Read the project's `AGENTS.md`, `README.md`, current `reports/eth-shock-v1/REPORT.md` and `research/eth-shock-plan.md`, plus the earlier `reports/stage2-eur100-v2/REPORT.md`, `research/stage2-policy.json`, and original `docs/research/REPORT.md`. `BUILD.md` describes the earlier implementation slice. The project adopts the shared Agent Guide coding baseline, meaningful behavioral tests, reproducible dependencies, independent review and the existing Project Starter checks. Financial and data-quality claims need their own evidence; passing code checks does not establish profit.
 
 Create or resume the workspace with the existing manager command:
 
