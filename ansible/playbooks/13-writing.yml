@@ -1,14 +1,16 @@
 ---
 # ============================================================================
-# 13-writing.yml — Deploy the Codex Writing Studio from canonical Forgejo.
+# 13-writing.yml — Deploy Pi Writing Studio from canonical Forgejo.
 # and register its direct-operation brief in Hive.
 #
 # Architecture:
-#   - `writing` is a standalone, Codex-only fiction workflow. The repo is
+#   - `writing` is a standalone, Pi-based fiction workflow. The repo is
 #     bind-mounted at /workspace; Bun serves the Writing UI on container port
-#     4974 and Codex conversations persist through tmux.
+#     4974 and new Pi conversations persist through tmux and /state.
 #   - Worlds, stories, and durable workflow state are ordinary repository files.
-#     Runtime state and Codex sessions/login live in Docker named volumes.
+#     Runtime state and legacy Codex sessions live in Docker named volumes.
+#     Pi auth is seeded separately, with settings in writing-pi and topic
+#     sessions in writing-state. The shared profile comes from 21-app-terminals.yml.
 #   - Hive may perform explicitly requested software engineering on apps/,
 #     packages/, scripts/, and deployment files. It must not run the fiction
 #     workflow or alter story/world content unless the operator asks.
@@ -38,6 +40,7 @@
     writing_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/writing.sops.yml') | from_yaml }}"
     hive_secrets: "{{ lookup('community.sops.sops', playbook_dir + '/../secrets/hive.sops.yml') | from_yaml }}"
     domain: "{{ hive_secrets.domain }}"
+    controller_pi_auth_file: "{{ lookup('env', 'HOME') }}/.pi/agent/auth.json"
     writing_dir: /opt/writing          # compose project dir == /workspace bind mount
     writing_git_ssh: /opt/writing-git-ssh
     writing_host_user: hive            # uid 1000, matching container user writing
@@ -203,6 +206,55 @@
       no_log: true
       tags: [config]
 
+    # Reuse the pinned Pi profile already installed by 21-app-terminals.yml.
+    - name: Require the shared Pi working profile on laptop1
+      ansible.builtin.stat:
+        path: /opt/app-terminal-image/pi-working-discipline/install.sh
+      register: writing_pi_profile
+      tags: [config]
+
+    - name: Stop if the shared Pi profile is absent
+      ansible.builtin.assert:
+        that: writing_pi_profile.stat.isreg | default(false)
+        fail_msg: Run playbooks/21-app-terminals.yml first to install the shared Pi profile.
+      tags: [config]
+
+    - name: Check for controller Pi login
+      ansible.builtin.stat:
+        path: "{{ controller_pi_auth_file }}"
+      delegate_to: localhost
+      become: false
+      register: writing_pi_auth_source
+      no_log: true
+      tags: [config]
+
+    - name: Require controller Pi login
+      ansible.builtin.assert:
+        that: writing_pi_auth_source.stat.isreg | default(false)
+        fail_msg: Controller Pi login is needed to seed Writing Studio.
+      no_log: true
+      tags: [config]
+
+    - name: Create private Writing Pi authentication directory
+      ansible.builtin.file:
+        path: /opt/writing-pi-auth
+        state: directory
+        owner: "1000"
+        group: "1000"
+        mode: "0700"
+      tags: [config]
+
+    - name: Seed Writing Pi authentication without replacing an existing login
+      ansible.builtin.copy:
+        src: "{{ controller_pi_auth_file }}"
+        dest: /opt/writing-pi-auth/auth.json
+        owner: "1000"
+        group: "1000"
+        mode: "0600"
+        force: false
+      no_log: true
+      tags: [config]
+
     # --- Per-system config: .env + traefik/routing override (both gitignored) ---
     - name: Write writing .env
       ansible.builtin.copy:
@@ -237,6 +289,7 @@
                 - "{{ writing_web_port }}:4974"
               environment:
                 NODE_ENV: production
+                WRITING_PI_PROFILE: /opt/pi-working-discipline
                 GIT_SSH_COMMAND: ssh -i /home/writing/.ssh/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new
                 GIT_AUTHOR_NAME: ${WRITING_GIT_USER_NAME:-writing-studio}
                 GIT_AUTHOR_EMAIL: ${WRITING_GIT_USER_EMAIL:-writing-studio@{{ domain }}}
@@ -259,7 +312,12 @@
                 - ${CODEX_AUTH_FILE}:/home/writing/.codex/auth.json:ro
                 - writing-codex:/home/writing/.codex/sessions
                 - writing-state:/state
+                - writing-pi:/home/writing/.pi/agent
+                - /opt/writing-pi-auth/auth.json:/home/writing/.pi/agent/auth.json
+                - /opt/app-terminal-image/pi-working-discipline:/opt/pi-working-discipline:ro
                 - {{ writing_git_ssh }}:/home/writing/.ssh:ro
+          volumes:
+            writing-pi:
         owner: "1000"
         group: "1000"
         mode: "0644"
@@ -401,7 +459,7 @@
         group: "1000"
         mode: "0644"
         content: |
-          # Project: writing — Codex Writing Studio
+          # Project: writing — Pi Writing Studio
 
           > **HANDLING MODE — DIRECT CHAT, NOT THE AUTONOMOUS PIPELINE.** Work
           > interactively in the live checkout. Do not create a worktree, branch,
@@ -417,7 +475,7 @@
 
           Perform only explicitly requested software engineering on `apps/`,
           `packages/`, `scripts/`, `Dockerfile`, or related tests/configuration.
-          Writing is a Codex-only fiction workflow; do not run its world/story
+          Writing is a Pi-based fiction workflow; do not run its world/story
           skills or alter `stories/`, `worlds/`, `IDEAS.md`, or `craft/` unless
           the operator explicitly requests fiction work.
 

@@ -511,6 +511,8 @@
           - /opt/writing
           - /var/lib/docker/volumes/writing_writing-codex/_data
           - /var/lib/docker/volumes/writing_writing-state/_data
+          - /var/lib/docker/volumes/writing_writing-pi/_data
+          - /opt/writing-pi-auth
           # todo app checkout and data: uncommitted terminal edits, SQLite, ntfy.
           - /opt/todo
           - /opt/todo-data
