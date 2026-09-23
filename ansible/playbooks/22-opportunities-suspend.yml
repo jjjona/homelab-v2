@@ -1,0 +1,32 @@
+---
+# Stop Opportunity Miner without deleting its data, reports, authentication, or releases.
+# Resume it by deploying a tested revision with 22-opportunities.yml.
+
+- name: Suspend Opportunity Miner on Laptop 1
+  hosts: laptop1
+  gather_facts: false
+  tags: [opportunities, suspend]
+  tasks:
+    - name: Check whether Opportunity Miner is running
+      ansible.builtin.command: docker inspect --format '{% raw %}{{.State.Running}}{% endraw %}' opportunities
+      register: opportunities_running
+      changed_when: false
+      failed_when: opportunities_running.rc not in [0, 1]
+      check_mode: false
+
+    - name: Stop Opportunity Miner
+      ansible.builtin.command: docker stop --time 30 opportunities
+      when:
+        - not ansible_check_mode
+        - opportunities_running.rc == 0
+        - opportunities_running.stdout == 'true'
+
+- name: Remove the Opportunity Miner public route
+  hosts: docker_host
+  gather_facts: false
+  tags: [opportunities, suspend, routing]
+  tasks:
+    - name: Remove the Opportunity Miner Traefik route
+      ansible.builtin.file:
+        path: /mnt/data/docker/core/traefik/dynamic/opportunities.yml
+        state: absent

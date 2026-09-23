@@ -12,6 +12,17 @@ The application extends Project Starter. Its inherited development terminal rema
 - Container: `opportunities`
 - Private route: Cloudflare Tunnel → Traefik authenticated `web` entrypoint → `192.168.0.165:4715`
 - Deployment: `ansible/playbooks/22-opportunities.yml`
+- Suspension: `ansible/playbooks/22-opportunities-suspend.yml`
+
+## Suspended — 2026-09-23
+
+The production container and public route are stopped. This prevents scheduled research from using the AI subscription. Persistent data, reports, Pi authentication, releases, and backups remain in place.
+
+Resume only by deploying a tested revision with `22-opportunities.yml`. Reapply the suspension without deleting state from `ansible/`:
+
+```sh
+ansible-playbook playbooks/22-opportunities-suspend.yml
+```
 
 The backend requires the exact public Host and the configured `Remote-Email` identity. Host firewall rules admit new connections to port 4715 only from Traefik at `192.168.0.159`. The health endpoint contains no report data. Do not expose the backend port directly or route it through `web-noauth`.
 
