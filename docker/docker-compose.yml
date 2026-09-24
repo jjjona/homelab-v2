@@ -533,7 +533,18 @@ services:
     restart: unless-stopped
     labels:
       - "traefik.enable=true"
+      # Booklore's cache-first Angular service worker can bypass the initial
+      # forward-auth navigation and leave logged-out users on a blank app shell.
+      # Serve Angular's safety worker without auth so browsers unregister it.
       - "traefik.http.routers.booklore.rule=Host(`books.${DOMAIN}`)"
+      - "traefik.http.routers.booklore.entrypoints=web-noauth"
+      - "traefik.http.routers.booklore.middlewares=tinyauth@docker"
+      - "traefik.http.routers.booklore-safety-worker.rule=Host(`books.${DOMAIN}`) && (Path(`/ngsw-worker.js`) || Path(`/worker-basic.min.js`))"
+      - "traefik.http.routers.booklore-safety-worker.entrypoints=web-noauth"
+      - "traefik.http.routers.booklore-safety-worker.priority=100"
+      - "traefik.http.routers.booklore-safety-worker.service=booklore"
+      - "traefik.http.routers.booklore-safety-worker.middlewares=booklore-disable-sw"
+      - "traefik.http.middlewares.booklore-disable-sw.replacepath.path=/safety-worker.js"
       - "traefik.http.services.booklore.loadbalancer.server.port=6060"
     networks:
       web:

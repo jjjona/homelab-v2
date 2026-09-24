@@ -290,6 +290,10 @@
               service: http://traefik:81
             - hostname: summarize.{{ secrets.domain }}
               service: http://traefik:81
+            # Booklore uses an explicit TinyAuth middleware on :81. Its safety
+            # worker route bypasses auth to remove the cache-first PWA worker.
+            - hostname: books.{{ secrets.domain }}
+              service: http://traefik:81
             # git.* (Forgejo, primary git server) on :81/web-noauth so git CLI + HTTP
             # bypass the tinyauth forwardAuth; web UI uses Forgejo's own login.
             - hostname: git.{{ secrets.domain }}
