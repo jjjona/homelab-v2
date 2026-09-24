@@ -467,6 +467,7 @@ services:
       - PGID=100
       - TZ=Europe/Brussels
     volumes:
+      - ./ephemera/scraper.js:/app/packages/api/dist/services/scraper.js:ro
       - /mnt/data/docker/ephemera/data:/app/data
       - /mnt/data/docker/ephemera/downloads:/app/downloads
       - /mnt/nas/books:/app/ingest
@@ -489,6 +490,7 @@ services:
       - PGID=100
       - TZ=Europe/Brussels
     volumes:
+      - ./ephemera/scraper.js:/app/packages/api/dist/services/scraper.js:ro
       - /mnt/data/docker/ephemera-summarize/data:/app/data
       - /mnt/data/docker/ephemera-summarize/downloads:/app/downloads
       - /mnt/nas/books-to-summarize:/app/ingest

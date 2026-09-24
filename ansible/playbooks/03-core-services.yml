@@ -110,6 +110,7 @@
         - "{{ project_dir }}/traefik/dynamic"
         - "{{ project_dir }}/cloudflared"
         - "{{ project_dir }}/gluetun"
+        - "{{ project_dir }}/ephemera"
         - /mnt/data/docker/arcane/data
         - /mnt/data/docker/jellyfin/config
         - /mnt/data/docker/jellyfin/cache
@@ -202,6 +203,14 @@
       ansible.builtin.copy:
         src: "{{ playbook_dir }}/../../docker/docker-compose.yml"
         dest: "{{ project_dir }}/docker-compose.yml"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Copy Ephemera search adapter
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../docker/ephemera/scraper.js"
+        dest: "{{ project_dir }}/ephemera/scraper.js"
         owner: root
         group: root
         mode: "0644"
