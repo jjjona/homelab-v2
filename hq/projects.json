@@ -253,7 +253,8 @@
         "projects": true,
         "disk_kib": 4107,
         "updated_at": "2026-08-26T15:27:57Z"
-      }
+      },
+      "workspace_port": 46004
     },
     {
       "slug": "hive-old",
@@ -768,7 +769,8 @@
         "projects": true,
         "disk_kib": 356,
         "updated_at": "2026-08-05T14:27:22Z"
-      }
+      },
+      "workspace_port": 46005
     },
     {
       "slug": "trade",
