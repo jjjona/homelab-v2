@@ -167,6 +167,9 @@
           TODO_WEB_PORT={{ todo_web_port }}
           NTFY_WEB_PORT={{ ntfy_web_port }}
           TODO_DATA_DIR={{ todo_data_dir }}
+          # Todo serves the Notes UI; Hive remains the single owner of the vault
+          # and encrypted OneDrive credentials, reached only over the LAN.
+          NOTES_API_URL=http://{{ hostvars['hive']['ansible_host'] }}:4483
           NTFY_TOPIC={{ todo_secrets.ntfy_topic }}
           NTFY_USER={{ todo_secrets.ntfy_user }}
           NTFY_PASSWORD={{ todo_secrets.ntfy_password }}
